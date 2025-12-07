@@ -1,0 +1,74 @@
+name: DOCX to Markdown and PDF
+
+on:
+  push:
+    paths:
+      - 'incoming/*.docx'
+
+jobs:
+  convert-docx:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc texlive-latex-base texlive-fonts-recommended
+
+      - name: Convert DOCX to Markdown and PDF
+        run: |
+          mkdir -p docs archive
+          for f in incoming/*.docx; do
+            base=$(basename "$f" .docx)
+            timestamp=$(date +%Y%m%d%H%M%S)
+            
+            # Archive old versions if exist
+            if [ -f "docs/${base}.md" ]; then
+              mv "docs/${base}.md" "archive/${base}-${timestamp}.md"
+            fi
+            if [ -f "docs/${base}.pdf" ]; then
+              mv "docs/${base}.pdf" "archive/${base}-${timestamp}.pdf"
+            fi
+            
+            # Convert to MD
+            pandoc "$f" -f docx -t gfm -o "docs/${base}.md"
+            
+            # Add YAML frontmatter (simple sed post-processing; adjust if needed)
+            sed -i '1i ---\
+            id: '"${base}"'\
+            title: Hello World Document Control\
+            version: 0.1\
+            status: Draft (Not Effective)\
+            author: Alex\
+            date: 2025-02-20\
+            ---\
+            ' "docs/${base}.md"
+            
+            # Convert to PDF
+            pandoc "$f" -f docx -t pdf -o "docs/${base}.pdf" --pdf-engine=pdflatex
+          done
+
+      - name: Commit converted files to a new branch
+        run: |
+          branch="auto/docx-to-md-pdf-$(date +%s)"
+          git config user.name "doc-bot"
+          git config user.email "doc-bot@example.com"
+          git checkout -b "$branch"
+          git add docs/*.md docs/*.pdf archive/*
+          git commit -m "Auto-convert DOCX to MD and PDF"
+          git push origin "$branch"
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ env.branch }}
+          base: main
+          title: "Auto: DOCX → MD + PDF"
+          body: |
+            This PR was automatically created from DOCX in `incoming/`.
+            Review MD diff and PDF output.
+            Old versions archived in `archive/`.
