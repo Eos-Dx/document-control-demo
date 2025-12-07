@@ -1,0 +1,64 @@
+name: DOCX to Markdown and PDF
+
+on:
+  push:
+    paths:
+      - 'incoming/*.docx'
+
+jobs:
+  convert-docx:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc texlive-latex-base texlive-fonts-recommended
+
+      - name: Convert DOCX to Markdown and PDF
+        run: |
+          mkdir -p docs archive
+
+          for f in incoming/*.docx; do
+            base=$(basename "$f" .docx)
+            timestamp=$(date +%Y%m%d%H%M%S)
+
+            # Archive old versions
+            if [ -f "docs/${base}.md" ]; then
+              mv "docs/${base}.md" "archive/${base}-${timestamp}.md"
+            fi
+            if [ -f "docs/${base}.pdf" ]; then
+              mv "docs/${base}.pdf" "archive/${base}-${timestamp}.pdf"
+            fi
+
+            # Convert to Markdown
+            pandoc "$f" -f docx -t gfm -o "docs/${base}.md"
+
+            # Prepend YAML frontmatter
+            frontmatter="---\nid: $base\ntitle: Hello World Document Control\nversion: 0.1\nstatus: Draft (Not Effective)\nauthor: Alex\ndate: 2025-02-20\n---\n"
+            printf "%b" "$frontmatter" | cat - "docs/${base}.md" > "docs/${base}.tmp"
+            mv "docs/${base}.tmp" "docs/${base}.md"
+
+            # Convert to PDF
+            pandoc "$f" -o "docs/${base}.pdf" --pdf-engine=pdflatex
+          done
+
+      # Commit & push
+      - name: Commit converted files to a new branch
+        run: |
+          branch="auto/docx-to-md-pdf-$(date +%s)"
+
+          echo "branch=$branch" >> $GITHUB_ENV
+
+          git config user.name "doc-bot"
+          git config user.email "doc-bot@example.com"
+
+          git checkout -b "$branch"
+          git add docs/*.md docs/*.pdf archive/*
+          git co

@@ -10,6 +10,7 @@
 .snapshots/
 #Testing Output folder
 .output/
+.idea
 #Extension App-file
 *.app
 #Rapid Application Development File
@@ -19,4 +20,5 @@ rad.json
 #License-file
 *.flf
 #Test results file
-TestResults.xml.DS_Store
+TestResults.xml
+.DS_Store
