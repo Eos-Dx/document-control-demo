@@ -21,10 +21,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             pandoc \
-            texlive-latex-base \
+            texlive-xetex \
             texlive-latex-recommended \
             texlive-latex-extra \
-            texlive-fonts-recommended
+            texlive-fonts-recommended \
+            texlive-lang-cyrillic
 
       - name: Convert DOCX to Markdown and PDF
         run: |
@@ -51,9 +52,10 @@ jobs:
             printf "%b" "$frontmatter" | cat - "docs/${base}.md" > "docs/${base}.tmp"
             mv "docs/${base}.tmp" "docs/${base}.md"
 
-            # Convert to PDF
-            pandoc "$f" -o "docs/${base}.pdf" --pdf-engine=pdflatex
+            # Convert to PDF (Unicode-safe)
+            pandoc "$f" -o "docs/${base}.pdf" --pdf-engine=xelatex
           done
+
 
       - name: Commit converted files to main
         run: |
