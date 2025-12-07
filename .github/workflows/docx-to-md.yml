@@ -1,4 +1,4 @@
-name: DOCX to Markdown (minimal)
+name: DOCX to Markdown and PDF
 
 on:
   push:
@@ -16,23 +16,52 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install pandoc
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pandoc
+          sudo apt-get install -y \
+            pandoc \
+            texlive-latex-base \
+            texlive-latex-recommended \
+            texlive-latex-extra \
+            texlive-fonts-recommended
 
-      - name: Convert DOCX to Markdown
+      - name: Convert DOCX to Markdown and PDF
         run: |
-          mkdir -p docs
+          mkdir -p docs archive
+
+          shopt -s nullglob
           for f in incoming/*.docx; do
             base=$(basename "$f" .docx)
+            timestamp=$(date +%Y%m%d%H%M%S)
+
+            # Archive old versions if they exist
+            if [ -f "docs/${base}.md" ]; then
+              mv "docs/${base}.md" "archive/${base}-${timestamp}.md"
+            fi
+            if [ -f "docs/${base}.pdf" ]; then
+              mv "docs/${base}.pdf" "archive/${base}-${timestamp}.pdf"
+            fi
+
+            # Convert to Markdown
             pandoc "$f" -f docx -t gfm -o "docs/${base}.md"
+
+            # Prepend YAML frontmatter
+            frontmatter="---\nid: $base\ntitle: Hello World Document Control\nversion: 0.1\nstatus: Draft (Not Effective)\nauthor: Alex\ndate: 2025-02-20\n---\n"
+            printf "%b" "$frontmatter" | cat - "docs/${base}.md" > "docs/${base}.tmp"
+            mv "docs/${base}.tmp" "docs/${base}.md"
+
+            # Convert to PDF
+            pandoc "$f" -o "docs/${base}.pdf" --pdf-engine=pdflatex
           done
 
-      - name: Commit Markdown back to main
+      - name: Commit converted files to main
         run: |
           git config user.name "doc-bot"
           git config user.email "doc-bot@example.com"
-          git add docs/*.md
-          git commit -m "Auto: convert DOCX to Markdown" || echo "No changes to commit"
+
+          # Добавляем файлы, если они есть
+          git add docs/*.md docs/*.pdf archive/* 2>/dev/null || true
+
+          git commit -m "Auto: convert DOCX to MD + PDF" || echo "No changes to commit"
           git push origin HEAD:main
