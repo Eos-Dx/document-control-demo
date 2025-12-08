@@ -23,39 +23,54 @@ jobs:
           sudo apt-get install -y curl jq
           sudo apt-get install -y libimage-exiftool-perl  # exiftool
 
-      - name: Detect changed PDF
+      # 1. Находим целевой PDF
+      - name: Detect target PDF
         id: changed
         run: |
+          # Сначала пытаемся найти изменённые pdf в этом коммите
           FILES=$(git diff-tree --no-commit-id --name-only -r $GITHUB_SHA | grep "^docs/.*\.pdf$" || true)
+
           if [ -z "$FILES" ]; then
-            echo "No PDF changes detected in docs/"
+            echo "No changed PDFs detected in commit. Fallback to any PDF in docs/."
+            FILES=$(ls docs/*.pdf 2>/dev/null || true)
+          fi
+
+          if [ -z "$FILES" ]; then
+            echo "No PDF files found in docs/. Nothing to publish."
             exit 0
           fi
-          echo "Changed PDF files:"
+
+          echo "PDF candidates:"
           echo "$FILES"
+
           FIRST=$(echo "$FILES" | head -n 1)
+          echo "Using PDF: $FIRST"
           echo "pdf=$FIRST" >> $GITHUB_OUTPUT
 
+      # 2. Вынимаем ID документа и версию (из md)
       - name: Extract document metadata (ID + version)
+        if: ${{ steps.changed.outputs.pdf != '' }}
         id: meta
         run: |
           PDF_PATH="${{ steps.changed.outputs.pdf }}"
           echo "PDF_PATH=$PDF_PATH"
 
-          FILENAME=$(basename "$PDF_PATH")      # напр. SOP-ITSM-000-Hello-World.pdf
-          BASENAME="${FILENAME%.pdf}"           # SOP-ITSM-000-Hello-World
+          FILENAME=$(basename "$PDF_PATH")        # напр. SOP-ITSM-000-Hello-World.pdf
+          BASENAME="${FILENAME%.pdf}"             # SOP-ITSM-000-Hello-World
 
-          # ID документа: первые три блока через дефис
-          DOC_ID=$(echo "$BASENAME" | cut -d'-' -f1-3)   # SOP-ITSM-000
+          # ID документа: первые три блока через дефис -> SOP-ITSM-000
+          DOC_ID=$(echo "$BASENAME" | cut -d'-' -f1-3)
 
-          # Попробуем вытащить версию из md (фронтматтер или строка Version:)
-          MD_FILE="docs/${DOC_ID}.md"
-          VERSION=""
+          # Связанный md-файл: docs/SOP-ITSM-000-Hello-World.md
+          MD_FILE="docs/${BASENAME}.md"
+          VERSION="0.0"
+
           if [ -f "$MD_FILE" ]; then
-            VERSION=$(grep -iE "^version:" "$MD_FILE" | head -n 1 | awk '{print $2}')
-          fi
-          if [ -z "$VERSION" ]; then
-            VERSION="0.0"
+            # Ищем строку вида "version: 0.2" (фронтматтер или обычная)
+            FOUND=$(grep -iE "^version:" "$MD_FILE" | head -n 1 | awk '{print $2}')
+            if [ -n "$FOUND" ]; then
+              VERSION="$FOUND"
+            fi
           fi
 
           echo "DOC_ID=$DOC_ID"
@@ -67,14 +82,16 @@ jobs:
           echo "basename=$BASENAME" >> $GITHUB_OUTPUT
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
 
+      # 3. Считаем SHA256 и вписываем метаданные в PDF
       - name: Compute SHA256 and embed metadata into PDF
+        if: ${{ steps.changed.outputs.pdf != '' }}
         id: sign
         run: |
           PDF_PATH="${{ steps.changed.outputs.pdf }}"
           DOC_ID="${{ steps.meta.outputs.doc_id }}"
           VERSION="${{ steps.meta.outputs.version }}"
 
-          # Считаем SHA256
+          # SHA256
           SHA256=$(sha256sum "$PDF_PATH" | awk '{print $1}')
           SHA_SHORT=$(echo $GITHUB_SHA | cut -c1-8)
           NOW=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
@@ -84,14 +101,13 @@ jobs:
           echo "APPROVER=$APPROVER"
           echo "TIME=$NOW"
 
-          # Запишем основные данные в output, пригодится ниже
           echo "sha256=$SHA256" >> $GITHUB_OUTPUT
 
-          # Добавляем метаданные в PDF:
-          # Title:  SOP-XXX vY.Y
+          # Метаданные PDF:
+          # Title:   SOP-XXX vY.Y
           # Subject: Approved SOP document
-          # Author: <github.actor>
-          # Keywords: APPROVED;DOC_ID=...;VERSION=...;SHA256=...;COMMIT=...
+          # Author:  <github.actor>
+          # Keywords: APPROVED;DOC_ID=...;VERSION=...;SHA256=...;COMMIT=...;...
           TITLE="${DOC_ID} v${VERSION}"
           SUBJECT="Approved SOP document"
           KEYWORDS="APPROVED;DOC_ID=${DOC_ID};VERSION=${VERSION};SHA256=${SHA256};COMMIT=${SHA_SHORT};PUBLISHED_AT=${NOW};PUBLISHED_BY=${APPROVER}"
@@ -103,7 +119,7 @@ jobs:
             -Keywords="$KEYWORDS" \
             "$PDF_PATH"
 
-          # Создаём отдельный .sha256 файл рядом с PDF (в репозитории)
+          # Создаём отдельный .sha256 файл (не коммитим, только для upload)
           HASH_FILE="docs/${DOC_ID}-v${VERSION}-approved.sha256"
           {
             echo "Document=${DOC_ID}-v${VERSION}-approved.pdf"
@@ -115,7 +131,9 @@ jobs:
 
           echo "hash_file=$HASH_FILE" >> $GITHUB_OUTPUT
 
+      # 4. Заливаем PDF и .sha256 в SharePoint (без overwrite)
       - name: Upload PDF and .sha256 to SharePoint
+        if: ${{ steps.changed.outputs.pdf != '' }}
         env:
           SP_SITE_URL: ${{ secrets.SP_SITE_URL }}
           SP_DOC_LIBRARY: ${{ secrets.SP_DOC_LIBRARY }}
@@ -139,7 +157,7 @@ jobs:
 
           FOLDER_ENCODED=$(echo "${SP_DOC_LIBRARY}/${TARGET_FOLDER}" | sed 's/ /%20/g')
 
-          # 1) Загружаем PDF. overwrite=false → если уже есть такой approved, это ошибка (не перезаписываем)
+          # 1) PDF. overwrite=false — НЕ перезаписывает существующий approved
           curl --silent --show-error --fail \
             --user "$SP_USERNAME:$SP_PASSWORD" \
             -X POST \
@@ -150,7 +168,7 @@ jobs:
 
           echo "PDF upload complete."
 
-          # 2) Загружаем .sha256 (можно перезаписать, но лучше тоже не overwrite — пусть версии будут уникальны)
+          # 2) .sha256. Тоже без overwrite — каждая версия уникальна
           curl --silent --show-error --fail \
             --user "$SP_USERNAME:$SP_PASSWORD" \
             -X POST \
