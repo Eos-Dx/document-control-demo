@@ -1,0 +1,162 @@
+name: Publish approved PDF to SharePoint (with metadata + hash)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/*.pdf"
+
+jobs:
+  publish_pdf:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install tools (hash + PDF metadata)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq
+          sudo apt-get install -y libimage-exiftool-perl  # exiftool
+
+      - name: Detect changed PDF
+        id: changed
+        run: |
+          FILES=$(git diff-tree --no-commit-id --name-only -r $GITHUB_SHA | grep "^docs/.*\.pdf$" || true)
+          if [ -z "$FILES" ]; then
+            echo "No PDF changes detected in docs/"
+            exit 0
+          fi
+          echo "Changed PDF files:"
+          echo "$FILES"
+          FIRST=$(echo "$FILES" | head -n 1)
+          echo "pdf=$FIRST" >> $GITHUB_OUTPUT
+
+      - name: Extract document metadata (ID + version)
+        id: meta
+        run: |
+          PDF_PATH="${{ steps.changed.outputs.pdf }}"
+          echo "PDF_PATH=$PDF_PATH"
+
+          FILENAME=$(basename "$PDF_PATH")      # напр. SOP-ITSM-000-Hello-World.pdf
+          BASENAME="${FILENAME%.pdf}"           # SOP-ITSM-000-Hello-World
+
+          # ID документа: первые три блока через дефис
+          DOC_ID=$(echo "$BASENAME" | cut -d'-' -f1-3)   # SOP-ITSM-000
+
+          # Попробуем вытащить версию из md (фронтматтер или строка Version:)
+          MD_FILE="docs/${DOC_ID}.md"
+          VERSION=""
+          if [ -f "$MD_FILE" ]; then
+            VERSION=$(grep -iE "^version:" "$MD_FILE" | head -n 1 | awk '{print $2}')
+          fi
+          if [ -z "$VERSION" ]; then
+            VERSION="0.0"
+          fi
+
+          echo "DOC_ID=$DOC_ID"
+          echo "VERSION=$VERSION"
+          echo "BASENAME=$BASENAME"
+
+          echo "doc_id=$DOC_ID" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "basename=$BASENAME" >> $GITHUB_OUTPUT
+          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+
+      - name: Compute SHA256 and embed metadata into PDF
+        id: sign
+        run: |
+          PDF_PATH="${{ steps.changed.outputs.pdf }}"
+          DOC_ID="${{ steps.meta.outputs.doc_id }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+
+          # Считаем SHA256
+          SHA256=$(sha256sum "$PDF_PATH" | awk '{print $1}')
+          SHA_SHORT=$(echo $GITHUB_SHA | cut -c1-8)
+          NOW=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          APPROVER="${{ github.actor }}"
+
+          echo "SHA256=$SHA256"
+          echo "APPROVER=$APPROVER"
+          echo "TIME=$NOW"
+
+          # Запишем основные данные в output, пригодится ниже
+          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+
+          # Добавляем метаданные в PDF:
+          # Title:  SOP-XXX vY.Y
+          # Subject: Approved SOP document
+          # Author: <github.actor>
+          # Keywords: APPROVED;DOC_ID=...;VERSION=...;SHA256=...;COMMIT=...
+          TITLE="${DOC_ID} v${VERSION}"
+          SUBJECT="Approved SOP document"
+          KEYWORDS="APPROVED;DOC_ID=${DOC_ID};VERSION=${VERSION};SHA256=${SHA256};COMMIT=${SHA_SHORT};PUBLISHED_AT=${NOW};PUBLISHED_BY=${APPROVER}"
+
+          exiftool -overwrite_original \
+            -Title="$TITLE" \
+            -Subject="$SUBJECT" \
+            -Author="$APPROVER" \
+            -Keywords="$KEYWORDS" \
+            "$PDF_PATH"
+
+          # Создаём отдельный .sha256 файл рядом с PDF (в репозитории)
+          HASH_FILE="docs/${DOC_ID}-v${VERSION}-approved.sha256"
+          {
+            echo "Document=${DOC_ID}-v${VERSION}-approved.pdf"
+            echo "SHA256=${SHA256}"
+            echo "Commit=${GITHUB_SHA}"
+            echo "PublishedBy=${APPROVER}"
+            echo "PublishedAt=${NOW}"
+          } > "$HASH_FILE"
+
+          echo "hash_file=$HASH_FILE" >> $GITHUB_OUTPUT
+
+      - name: Upload PDF and .sha256 to SharePoint
+        env:
+          SP_SITE_URL: ${{ secrets.SP_SITE_URL }}
+          SP_DOC_LIBRARY: ${{ secrets.SP_DOC_LIBRARY }}
+          SP_ROOT_FOLDER: ${{ secrets.SP_ROOT_FOLDER }}
+          SP_USERNAME: ${{ secrets.SP_USERNAME }}
+          SP_PASSWORD: ${{ secrets.SP_PASSWORD }}
+        run: |
+          PDF_PATH="${{ steps.changed.outputs.pdf }}"
+          DOC_ID="${{ steps.meta.outputs.doc_id }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+          HASH_FILE="${{ steps.sign.outputs.hash_file }}"
+
+          TARGET_FOLDER="${SP_ROOT_FOLDER}/${DOC_ID}"
+          TARGET_PDF="${DOC_ID}-v${VERSION}-approved.pdf"
+          TARGET_HASH="${DOC_ID}-v${VERSION}-approved.sha256"
+
+          echo "Will upload:"
+          echo "  PDF : $PDF_PATH  → $TARGET_PDF"
+          echo "  HASH: $HASH_FILE → $TARGET_HASH"
+          echo "  Folder: $TARGET_FOLDER"
+
+          FOLDER_ENCODED=$(echo "${SP_DOC_LIBRARY}/${TARGET_FOLDER}" | sed 's/ /%20/g')
+
+          # 1) Загружаем PDF. overwrite=false → если уже есть такой approved, это ошибка (не перезаписываем)
+          curl --silent --show-error --fail \
+            --user "$SP_USERNAME:$SP_PASSWORD" \
+            -X POST \
+            -H "accept: application/json;odata=verbose" \
+            -H "content-type: application/octet-stream" \
+            --data-binary @"$PDF_PATH" \
+            "${SP_SITE_URL}/_api/web/GetFolderByServerRelativeUrl('${FOLDER_ENCODED}')/Files/add(url='${TARGET_PDF}',overwrite=false)"
+
+          echo "PDF upload complete."
+
+          # 2) Загружаем .sha256 (можно перезаписать, но лучше тоже не overwrite — пусть версии будут уникальны)
+          curl --silent --show-error --fail \
+            --user "$SP_USERNAME:$SP_PASSWORD" \
+            -X POST \
+            -H "accept: application/json;odata=verbose" \
+            -H "content-type: text/plain" \
+            --data-binary @"$HASH_FILE" \
+            "${SP_SITE_URL}/_api/web/GetFolderByServerRelativeUrl('${FOLDER_ENCODED}')/Files/add(url='${TARGET_HASH}',overwrite=false)"
+
+          echo "SHA256 file upload complete."
