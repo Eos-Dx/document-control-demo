@@ -19,6 +19,8 @@ rad.json
 *.g.xlf
 #License-file
 *.flf
+~$*
+incoming/~$*
 #Test results file
 TestResults.xml
 .DS_Store
