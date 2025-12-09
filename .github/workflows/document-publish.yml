@@ -1,7 +1,8 @@
 name: Send approved PDF to DocuSign (JWT)
 
 on:
-  push:
+  pull_request:
+    types: [closed]
     branches:
       - main
     paths:
