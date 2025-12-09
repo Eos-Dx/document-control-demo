@@ -1,4 +1,4 @@
-name: Document Build (DOCX → MD + PDF)
+name: DOCX to MD+PDF (PR branches)
 
 on:
   push:
@@ -6,127 +6,71 @@ on:
       - main
     paths:
       - "incoming/*.docx"
-  workflow_dispatch:
 
 jobs:
-  build_doc:
+  docx_to_md:
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Cache apt packages
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          packages: pandoc texlive texlive-xetex texlive-latex-recommended texlive-latex-extra fonts-dejavu
-          version: 1.0
-
-      - name: Install dependencies (Pandoc + TeX + fonts)
+      - name: Install pandoc and LaTeX (for PDF)
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            pandoc \
-            texlive \
-            texlive-xetex \
-            texlive-latex-recommended \
-            texlive-latex-extra \
-            fonts-dejavu
+          # Минимальный набор, который у нас уже работал
+          sudo apt-get install -y pandoc \
+                                  texlive-latex-base \
+                                  texlive-latex-recommended \
+                                  texlive-fonts-recommended \
+                                  texlive-xetex
 
-      - name: Verify installations
+      - name: Convert changed DOCX to MD and PDF
         run: |
-          echo "Pandoc version: $(pandoc --version | head -n1)"
-          echo "XeLaTeX version: $(xelatex --version | head -n1)"
-
-      - name: Convert DOCX to MD and PDF
-        id: convert
-        run: |
-          set -e
-          
           mkdir -p docs archive
-          
-          CONVERTED=0
-          
-          for f in incoming/*.docx; do
-            if [ ! -f "$f" ]; then
-              echo "No DOCX files found in incoming/"
-              exit 0
-            fi
-            
-            base=$(basename "$f" .docx)
-            timestamp=$(date +%Y%m%d-%H%M%S)
-            
-            echo "Processing: $f"
-            echo "Base name: $base"
-            
+
+          CHANGED_DOCX=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep "^incoming/.*\.docx$" || true)
+
+          if [ -z "$CHANGED_DOCX" ]; then
+            echo "No DOCX files changed in this commit."
+            exit 0
+          fi
+
+          echo "Changed DOCX files:"
+          echo "$CHANGED_DOCX"
+
+          for f in $CHANGED_DOCX; do
+            base=$(basename "$f" .docx)   # SOP-ITSM-000-Hello-World
+            ts=$(date +%Y%m%d%H%M%S)
+
+            # Архивируем старые версии, если есть
             if [ -f "docs/${base}.md" ]; then
-              echo "Archiving existing docs/${base}.md"
-              cp "docs/${base}.md" "archive/${base}-${timestamp}.md"
+              mv "docs/${base}.md" "archive/${base}-${ts}.md"
             fi
             if [ -f "docs/${base}.pdf" ]; then
-              echo "Archiving existing docs/${base}.pdf"
-              cp "docs/${base}.pdf" "archive/${base}-${timestamp}.pdf"
+              mv "docs/${base}.pdf" "archive/${base}-${ts}.pdf"
             fi
-            
-            echo "Converting to Markdown..."
-            pandoc "$f" \
-              -f docx \
-              -t gfm \
-              --wrap=preserve \
-              -o "docs/${base}.md"
-            
-            echo "Converting to PDF..."
-            pandoc "$f" \
-              -o "docs/${base}.pdf" \
-              --pdf-engine=xelatex \
-              --variable geometry:margin=1in \
-              --variable fontsize=11pt
-            
-            echo "✓ Converted: $base"
-            CONVERTED=$((CONVERTED + 1))
-          done
-          
-          echo "files_converted=$CONVERTED" >> "$GITHUB_OUTPUT"
-          echo "Total files converted: $CONVERTED"
 
-      - name: Commit and push to same branch
-        if: steps.convert.outputs.files_converted > 0
+            echo "Converting $f → docs/${base}.md"
+            pandoc "$f" -f docx -t gfm -o "docs/${base}.md"
+
+            echo "Converting $f → docs/${base}.pdf"
+            pandoc "$f" -o "docs/${base}.pdf" --pdf-engine=xelatex
+          done
+
+      - name: Commit generated MD and PDF
         run: |
           git config user.name "doc-bot"
           git config user.email "doc-bot@example.com"
-          
-          git add docs/ archive/
-          
-          COMMIT_MSG="docs: Automated DOCX to MD/PDF conversion
 
-          Converted ${{ steps.convert.outputs.files_converted }} document(s)
-          - Generated Markdown and PDF outputs
-          - Archived previous versions with timestamp
+          git add docs/*.md docs/*.pdf archive/* || true
 
-          [skip ci]"
-
-          git commit -m "$COMMIT_MSG"
-
-          git push
-
-
-      - name: Summary
-        if: always()
-        run: |
-          if [ "${{ steps.convert.outputs.files_converted }}" -gt 0 ]; then
-            echo "✅ Conversion completed successfully"
-            echo "📝 Files converted: ${{ steps.convert.outputs.files_converted }}"
-            echo "🔀 Changes pushed to current branch"
-            echo ""
-            echo "Next steps:"
-            echo "1. Review the generated MD and PDF files"
-            echo "2. Create a Pull Request manually when ready"
-            echo "3. After PR is merged to main, DocuSign workflow will trigger"
-          else
-            echo "ℹ️ No DOCX files found or processed"
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
           fi
+
+          git commit -m "Auto: convert DOCX to MD+PDF"
+          git push origin HEAD
