@@ -1,4 +1,4 @@
-name: Document Build (DOCX → MD + PDF → PR)
+name: DOCX to MD+PDF (PR branches)
 
 on:
   push:
@@ -8,57 +8,69 @@ on:
       - "incoming/*.docx"
 
 jobs:
-  build_doc:
+  docx_to_md:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install dependencies (Pandoc + TeX + fonts)
+      - name: Install pandoc and LaTeX (for PDF)
         run: |
           sudo apt-get update
-          sudo apt-get install -y pandoc
-          sudo apt-get install -y texlive texlive-xetex texlive-latex-recommended texlive-latex-extra
-          sudo apt-get install -y fonts-dejavu
+          # Минимальный набор, который у нас уже работал
+          sudo apt-get install -y pandoc \
+                                  texlive-latex-base \
+                                  texlive-latex-recommended \
+                                  texlive-fonts-recommended \
+                                  texlive-xetex
 
-      - name: Convert DOCX to MD and PDF
+      - name: Convert changed DOCX to MD and PDF
         run: |
           mkdir -p docs archive
 
-          for f in incoming/*.docx; do
-            base=$(basename "$f" .docx)
+          CHANGED_DOCX=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep "^incoming/.*\.docx$" || true)
 
-            # Archive existing MD/PDF if they exist
+          if [ -z "$CHANGED_DOCX" ]; then
+            echo "No DOCX files changed in this commit."
+            exit 0
+          fi
+
+          echo "Changed DOCX files:"
+          echo "$CHANGED_DOCX"
+
+          for f in $CHANGED_DOCX; do
+            base=$(basename "$f" .docx)   # SOP-ITSM-000-Hello-World
+            ts=$(date +%Y%m%d%H%M%S)
+
+            # Архивируем старые версии, если есть
             if [ -f "docs/${base}.md" ]; then
-              mv "docs/${base}.md" "archive/${base}-$(date +%Y%m%d%H%M%S).md"
+              mv "docs/${base}.md" "archive/${base}-${ts}.md"
             fi
             if [ -f "docs/${base}.pdf" ]; then
-              mv "docs/${base}.pdf" "archive/${base}-$(date +%Y%m%d%H%M%S).pdf"
+              mv "docs/${base}.pdf" "archive/${base}-${ts}.pdf"
             fi
 
-            # Generate Markdown
+            echo "Converting $f → docs/${base}.md"
             pandoc "$f" -f docx -t gfm -o "docs/${base}.md"
 
-            # Generate PDF using xelatex (supports Unicode)
+            echo "Converting $f → docs/${base}.pdf"
             pandoc "$f" -o "docs/${base}.pdf" --pdf-engine=xelatex
           done
 
-      - name: Commit generated files
+      - name: Commit generated MD and PDF
         run: |
           git config user.name "doc-bot"
           git config user.email "doc-bot@example.com"
-          git add docs archive
-          git commit -m "Automated DOCX → MD/PDF conversion" || echo "No changes to commit"
-          git push
 
-      - name: Create or update Pull Request
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          title: "Update Document from Word Source"
-          body: "Automated conversion of updated DOCX into MD and PDF. Please review changes."
-          base: main
+          git add docs/*.md docs/*.pdf archive/* || true
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Auto: convert DOCX to MD+PDF"
+          git push origin HEAD
