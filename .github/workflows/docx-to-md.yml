@@ -8,7 +8,7 @@ on:
       - "incoming/*.docx"
 
 jobs:
-  docx_to_md:
+  build-docs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -16,61 +16,72 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Install pandoc and LaTeX (for PDF)
+      # Проверяем, есть ли DOCX вообще
+      - name: Detect DOCX files
+        id: detect
         run: |
-          sudo apt-get update
-          # Минимальный набор, который у нас уже работал
-          sudo apt-get install -y pandoc \
-                                  texlive-latex-base \
-                                  texlive-latex-recommended \
-                                  texlive-fonts-recommended \
-                                  texlive-xetex
-
-      - name: Convert changed DOCX to MD and PDF
-        run: |
-          mkdir -p docs archive
-
-          CHANGED_DOCX=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep "^incoming/.*\.docx$" || true)
-
-          if [ -z "$CHANGED_DOCX" ]; then
-            echo "No DOCX files changed in this commit."
-            exit 0
+          FILES=$(ls incoming/*.docx 2>/dev/null || true)
+          if [ -z "$FILES" ]; then
+            echo "has_docx=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ No DOCX files found in incoming/"
+          else
+            echo "has_docx=true" >> $GITHUB_OUTPUT
+            echo "Found DOCX files:"
+            echo "$FILES"
           fi
 
-          echo "Changed DOCX files:"
-          echo "$CHANGED_DOCX"
+      - name: Install pandoc + LaTeX
+        if: ${{ steps.detect.outputs.has_docx == 'true' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc
+          sudo apt-get install -y texlive-latex-base texlive-fonts-recommended texlive-latex-extra
 
-          for f in $CHANGED_DOCX; do
-            base=$(basename "$f" .docx)   # SOP-ITSM-000-Hello-World
-            ts=$(date +%Y%m%d%H%M%S)
+      - name: Convert DOCX to MD + PDF
+        if: ${{ steps.detect.outputs.has_docx == 'true' }}
+        run: |
+          mkdir -p docs archive
+          count=0
+
+          for f in incoming/*.docx; do
+            [ -e "$f" ] || continue
+            base=$(basename "$f" .docx)
+            timestamp=$(date +%Y%m%d%H%M%S)
+            count=$((count+1))
+
+            echo "Processing $f"
 
             # Архивируем старые версии, если есть
             if [ -f "docs/${base}.md" ]; then
-              mv "docs/${base}.md" "archive/${base}-${ts}.md"
+              mv "docs/${base}.md" "archive/${base}-${timestamp}.md"
             fi
             if [ -f "docs/${base}.pdf" ]; then
-              mv "docs/${base}.pdf" "archive/${base}-${ts}.pdf"
+              mv "docs/${base}.pdf" "archive/${base}-${timestamp}.pdf"
             fi
 
-            echo "Converting $f → docs/${base}.md"
+            # DOCX -> MD (GitHub Flavored Markdown)
             pandoc "$f" -f docx -t gfm -o "docs/${base}.md"
 
-            echo "Converting $f → docs/${base}.pdf"
-            pandoc "$f" -o "docs/${base}.pdf" --pdf-engine=xelatex
+            # DOCX -> PDF
+            pandoc "$f" -f docx -o "docs/${base}.pdf" --pdf-engine=pdflatex
           done
 
-      - name: Commit generated MD and PDF
+          echo "processed_count=$count" >> $GITHUB_OUTPUT
+
+      - name: Commit generated MD+PDF into PR branch
+        if: ${{ steps.detect.outputs.has_docx == 'true' }}
         run: |
           git config user.name "doc-bot"
           git config user.email "doc-bot@example.com"
 
           git add docs/*.md docs/*.pdf archive/* || true
-
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
-          git commit -m "Auto: convert DOCX to MD+PDF"
+          git commit -m "Auto: DOCX to MD+PDF"
           git push origin HEAD
