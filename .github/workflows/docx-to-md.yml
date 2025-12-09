@@ -102,13 +102,15 @@ jobs:
           
           git add docs/ archive/
           
-          git commit -m "docs: Automated DOCX → MD/PDF conversion
+          COMMIT_MSG="docs: Automated DOCX to MD/PDF conversion
 
-- Converted ${{ steps.convert.outputs.files_converted }} document(s)
+Converted ${{ steps.convert.outputs.files_converted }} document(s)
 - Generated Markdown and PDF outputs
 - Archived previous versions with timestamp
 
 [skip ci]"
+          
+          git commit -m "$COMMIT_MSG"
           
           git push
 
