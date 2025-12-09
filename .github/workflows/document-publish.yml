@@ -6,7 +6,7 @@ on:
       - main
     paths:
       - "docs/*.pdf"
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
     inputs:
       pdf_file:
         description: 'Specific PDF file to send (e.g., SOP-001.pdf)'
@@ -23,19 +23,16 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2  # Need previous commit for diff
+          fetch-depth: 2
 
-      # Setup jq properly instead of apt-get every time
       - name: Setup jq
         uses: dcarbone/install-jq-action@v2
 
-      # Find which PDF(s) changed
       - name: Find target PDF
         id: pdf
         run: |
           set -e
-
-          # Manual trigger with specific file
+          
           if [ -n "${{ github.event.inputs.pdf_file }}" ]; then
             PDF_PATH="docs/${{ github.event.inputs.pdf_file }}"
             if [ -f "$PDF_PATH" ]; then
@@ -47,25 +44,22 @@ jobs:
               exit 1
             fi
           fi
-
-          # Automatic trigger: find changed PDFs
+          
           FILES=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep "^docs/.*\.pdf$" || true)
-
+          
           if [ -z "$FILES" ]; then
-            echo "ℹ️ No changed PDFs detected in this commit."
+            echo "No changed PDFs detected in this commit."
             echo "Nothing to send to DocuSign."
             exit 0
           fi
-
-          echo "📄 Changed PDFs:"
+          
+          echo "Changed PDFs:"
           echo "$FILES"
-
-          # Use first changed PDF
+          
           FIRST=$(echo "$FILES" | head -n 1)
-          echo "✓ Selected: $FIRST"
+          echo "Selected: $FIRST"
           echo "path=$FIRST" >> "$GITHUB_OUTPUT"
 
-      # Generate JWT and get DocuSign access token
       - name: Get DocuSign access token via JWT
         if: steps.pdf.outputs.path != ''
         id: jwt
@@ -76,102 +70,84 @@ jobs:
           DOCUSIGN_PRIVATE_KEY: ${{ secrets.DOCUSIGN_PRIVATE_KEY }}
         run: |
           set -e
-
-          echo "🔐 Generating JWT for DocuSign authentication..."
-
-          # Save private key to file (will be cleaned up automatically)
+          
+          echo "Generating JWT for DocuSign authentication..."
+          
           echo "$DOCUSIGN_PRIVATE_KEY" > private.key
           chmod 600 private.key
-
-          # Token lifetime: 1 hour
+          
           NOW=$(date +%s)
           EXP=$((NOW + 3600))
-
-          # Build JWT components
+          
           HEADER='{"alg":"RS256","typ":"JWT"}'
-          PAYLOAD=$(cat <<EOF
-{"iss":"$DOCUSIGN_INTEGRATION_KEY","sub":"$DOCUSIGN_USER_ID","aud":"$DOCUSIGN_AUTH_SERVER","scope":"signature impersonation","exp":$EXP}
-EOF
-          )
-
-          # Base64url encoding function
+          PAYLOAD='{"iss":"'"$DOCUSIGN_INTEGRATION_KEY"'","sub":"'"$DOCUSIGN_USER_ID"'","aud":"'"$DOCUSIGN_AUTH_SERVER"'","scope":"signature impersonation","exp":'"$EXP"'}'
+          
           b64url() {
             openssl base64 -e -A | tr '+/' '-_' | tr -d '='
           }
-
-          # Encode header and payload
+          
           HEADER_B64=$(printf '%s' "$HEADER" | b64url)
           PAYLOAD_B64=$(printf '%s' "$PAYLOAD" | b64url)
           DATA="$HEADER_B64.$PAYLOAD_B64"
-
-          # Sign with RSA-SHA256
-          SIGNATURE=$(printf '%s' "$DATA" \
-            | openssl dgst -sha256 -sign private.key \
-            | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
-
+          
+          SIGNATURE=$(printf '%s' "$DATA" | openssl dgst -sha256 -sign private.key | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
+          
           JWT="$DATA.$SIGNATURE"
-
-          echo "🌐 Requesting access token from DocuSign..."
-
-          # Request access token
+          
+          echo "Requesting access token from DocuSign..."
+          
           RESPONSE=$(curl --silent --show-error --fail \
             --request POST \
             --url "https://${DOCUSIGN_AUTH_SERVER}/oauth/token" \
             --header "Content-Type: application/x-www-form-urlencoded" \
             --data "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${JWT}")
-
+          
           ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
-
+          
           if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
-            echo "❌ Failed to obtain access token"
+            echo "Failed to obtain access token"
             echo "Response: $RESPONSE"
             exit 1
           fi
-
-          echo "✓ Access token obtained"
-
-          # Mask token in logs and save to output
+          
+          echo "Access token obtained"
+          
           echo "::add-mask::$ACCESS_TOKEN"
           echo "token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
-
-          # Cleanup
+          
           rm -f private.key
 
-      # Prepare PDF (save to file instead of GITHUB_OUTPUT to avoid size limits)
       - name: Prepare PDF
         if: steps.pdf.outputs.path != ''
         id: prepare
         run: |
           set -e
-
+          
           PDF_PATH="${{ steps.pdf.outputs.path }}"
-
+          
           if [ ! -f "$PDF_PATH" ]; then
-            echo "❌ Error: PDF file not found: $PDF_PATH"
+            echo "Error: PDF file not found: $PDF_PATH"
             exit 1
           fi
-
+          
           FILENAME=$(basename "$PDF_PATH")
-          FILESIZE=$(stat -f%z "$PDF_PATH" 2>/dev/null || stat -c%s "$PDF_PATH" 2>/dev/null)
+          FILESIZE=$(stat -c%s "$PDF_PATH")
           FILESIZE_MB=$(echo "scale=2; $FILESIZE / 1048576" | bc)
-
-          echo "📄 PDF Details:"
+          
+          echo "PDF Details:"
           echo "  Path: $PDF_PATH"
           echo "  Filename: $FILENAME"
           echo "  Size: ${FILESIZE_MB} MB"
-
-          # Encode to base64 and save to file
-          echo "🔄 Encoding PDF to base64..."
+          
+          echo "Encoding PDF to base64..."
           base64 -w0 "$PDF_PATH" > pdf_base64.txt
-
-          # Verify base64 encoding
-          B64_SIZE=$(stat -f%z pdf_base64.txt 2>/dev/null || stat -c%s pdf_base64.txt 2>/dev/null)
+          
+          B64_SIZE=$(stat -c%s pdf_base64.txt)
           echo "  Base64 size: $B64_SIZE bytes"
-
+          
           echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
-          echo "✓ PDF prepared for DocuSign"
+          echo "PDF prepared for DocuSign"
 
-      # Send envelope to DocuSign
       - name: Send envelope to DocuSign
         if: steps.pdf.outputs.path != ''
         env:
@@ -181,21 +157,20 @@ EOF
           DOCUSIGN_SIGNER_NAME: ${{ secrets.DOCUSIGN_SIGNER_NAME }}
         run: |
           set -e
-
+          
           ACCESS_TOKEN="${{ steps.jwt.outputs.token }}"
           B64=$(cat pdf_base64.txt)
           FILENAME="${{ steps.prepare.outputs.filename }}"
-
+          
           if [ -z "$ACCESS_TOKEN" ]; then
-            echo "❌ No access token available"
+            echo "No access token available"
             exit 1
           fi
-
-          echo "📤 Creating envelope in DocuSign..."
+          
+          echo "Creating envelope in DocuSign..."
           echo "  Document: $FILENAME"
           echo "  Signer: $DOCUSIGN_SIGNER_NAME <$DOCUSIGN_SIGNER_EMAIL>"
-
-          # Build JSON payload using jq for proper escaping
+          
           PAYLOAD=$(jq -n \
             --arg subject "Please sign: $FILENAME" \
             --arg doc_b64 "$B64" \
@@ -228,37 +203,35 @@ EOF
               },
               status: "sent"
             }')
-
-          # Send to DocuSign
+          
           RESPONSE=$(curl --silent --show-error --fail \
             --request POST \
             --url "${DOCUSIGN_BASE_URI}/restapi/v2.1/accounts/${DOCUSIGN_ACCOUNT_ID}/envelopes" \
             --header "Authorization: Bearer ${ACCESS_TOKEN}" \
             --header "Content-Type: application/json" \
             --data "$PAYLOAD")
-
-          # Parse response
+          
           ENVELOPE_ID=$(echo "$RESPONSE" | jq -r '.envelopeId')
           STATUS=$(echo "$RESPONSE" | jq -r '.status')
-
+          
           if [ -z "$ENVELOPE_ID" ] || [ "$ENVELOPE_ID" = "null" ]; then
-            echo "❌ Failed to create envelope"
+            echo "Failed to create envelope"
             echo "Response: $RESPONSE"
             exit 1
           fi
-
-          echo "✅ Envelope created successfully!"
+          
+          echo "Envelope created successfully!"
           echo "  Envelope ID: $ENVELOPE_ID"
           echo "  Status: $STATUS"
           echo ""
-          echo "📧 Signature request has been sent to:"
-          echo "  → $DOCUSIGN_SIGNER_NAME <$DOCUSIGN_SIGNER_EMAIL>"
+          echo "Signature request has been sent to:"
+          echo "  $DOCUSIGN_SIGNER_NAME <$DOCUSIGN_SIGNER_EMAIL>"
           echo ""
-          echo "🔒 Part 11 Compliant Process:"
-          echo "  ✓ Document frozen in PDF format"
-          echo "  ✓ Electronic signature with audit trail"
-          echo "  ✓ Signer authentication via DocuSign"
-          echo "  ✓ Certificate of Completion will be generated"
+          echo "Part 11 Compliant Process:"
+          echo "  - Document frozen in PDF format"
+          echo "  - Electronic signature with audit trail"
+          echo "  - Signer authentication via DocuSign"
+          echo "  - Certificate of Completion will be generated"
 
       - name: Cleanup
         if: always()
@@ -269,8 +242,8 @@ EOF
         if: always()
         run: |
           if [ -n "${{ steps.pdf.outputs.path }}" ]; then
-            echo "✅ DocuSign workflow completed"
-            echo "📄 Document: ${{ steps.prepare.outputs.filename }}"
+            echo "DocuSign workflow completed"
+            echo "Document: ${{ steps.prepare.outputs.filename }}"
           else
-            echo "ℹ️ No PDFs to process"
+            echo "No PDFs to process"
           fi
