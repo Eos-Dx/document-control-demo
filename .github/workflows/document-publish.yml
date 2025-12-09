@@ -14,16 +14,17 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find changed PDF
+      - name: Find changed PDF in this push
         id: pdf
         run: |
+          set -e
           FILES=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep "^docs/.*\.pdf$" || true)
 
           if [ -z "$FILES" ]; then
-            echo "No changed PDFs detected in this commit. Nothing to send."
+            echo "ℹ️ No changed PDFs in docs/ for this commit. Nothing to send."
             exit 0
           fi
 
@@ -34,10 +35,11 @@ jobs:
           echo "Using PDF: $FIRST"
           echo "path=$FIRST" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare PDF as base64
+      - name: Base64 encode PDF
         if: ${{ steps.pdf.outputs.path != '' }}
         id: b64
         run: |
+          set -e
           PDF_PATH="${{ steps.pdf.outputs.path }}"
           echo "PDF_PATH=$PDF_PATH"
 
@@ -47,75 +49,88 @@ jobs:
           echo "b64=$B64" >> "$GITHUB_OUTPUT"
           echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
 
-      - name: Install Python deps for JWT
+      - name: Get DocuSign access token via JWT
         if: ${{ steps.pdf.outputs.path != '' }}
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyjwt requests
-
-      - name: Get DocuSign access token (JWT)
-        if: ${{ steps.pdf.outputs.path != '' }}
-        id: jwt
+        id: token
         env:
           DOCUSIGN_AUTH_SERVER: ${{ secrets.DOCUSIGN_AUTH_SERVER }}
           DOCUSIGN_INTEGRATION_KEY: ${{ secrets.DOCUSIGN_INTEGRATION_KEY }}
           DOCUSIGN_USER_ID: ${{ secrets.DOCUSIGN_USER_ID }}
-          DOCUSIGN_PRIVATE_KEY: ${{ secrets.DOCUSIGN_PRIVATE_KEY }}
+          DOCUSIGN_RSA_PRIVATE_KEY: ${{ secrets.DOCUSIGN_RSA_PRIVATE_KEY }}
         run: |
-          python - << 'PY'
-          import os, time, json
-          import jwt, requests
+          set -e
 
-          integration_key = os.environ["DOCUSIGN_INTEGRATION_KEY"]
-          user_id = os.environ["DOCUSIGN_USER_ID"]
-          auth_server = os.environ["DOCUSIGN_AUTH_SERVER"]
-          private_key = os.environ["DOCUSIGN_PRIVATE_KEY"].encode("utf-8")
+          # Сохраняем приватный ключ во временный файл
+          echo "Writing RSA private key to file..."
+          printf '%s\n' "$DOCUSIGN_RSA_PRIVATE_KEY" > docusign_private.key
 
-          now = int(time.time())
-          payload = {
-              "iss": integration_key,
-              "sub": user_id,
-              "aud": auth_server,
-              "iat": now,
-              "exp": now + 3600,
-              "scope": "signature"
+          # JWT заголовок и payload
+          HEADER='{"alg":"RS256","typ":"JWT"}'
+
+          NOW=$(date +%s)
+          EXP=$((NOW + 3600)) # токен на 1 час
+
+          # Для demo-окружения aud = account-d.docusign.com
+          PAYLOAD=$(cat <<EOF
+          {
+            "iss": "${DOCUSIGN_INTEGRATION_KEY}",
+            "sub": "${DOCUSIGN_USER_ID}",
+            "aud": "account-d.docusign.com",
+            "iat": ${NOW},
+            "exp": ${EXP},
+            "scope": "signature impersonation"
+          }
+          EOF
+          )
+
+          b64url() {
+            openssl base64 -e -A | tr '+/' '-_' | tr -d '='
           }
 
-          token = jwt.encode(payload, private_key, algorithm="RS256")
+          HEADER_B64=$(printf '%s' "$HEADER" | b64url)
+          PAYLOAD_B64=$(printf '%s' "$PAYLOAD" | b64url)
+          DATA="${HEADER_B64}.${PAYLOAD_B64}"
 
-          url = f"https://{auth_server}/oauth/token"
-          resp = requests.post(
-              url,
-              data={
-                  "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
-                  "assertion": token,
-              },
-          )
-          resp.raise_for_status()
-          access_token = resp.json()["access_token"]
+          SIG=$(printf '%s' "$DATA" | openssl dgst -sha256 -sign docusign_private.key | b64url)
+          JWT="${DATA}.${SIG}"
 
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"access_token={access_token}\n")
-          PY
+          echo "Requesting access token from ${DOCUSIGN_AUTH_SERVER}..."
+          RESP=$(curl --silent --show-error --fail \
+            --request POST \
+            --url "${DOCUSIGN_AUTH_SERVER}/oauth/token" \
+            --header "Content-Type: application/x-www-form-urlencoded" \
+            --data "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${JWT}")
+
+          ACCESS_TOKEN=$(echo "$RESP" | jq -r '.access_token')
+
+          if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
+            echo "Failed to obtain access token. Response:"
+            echo "$RESP"
+            exit 1
+          fi
+
+          echo "Access token obtained."
+          echo "access_token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
 
       - name: Send envelope to DocuSign
         if: ${{ steps.pdf.outputs.path != '' }}
         env:
-          DOCUSIGN_BASE_URI: ${{ secrets.DOCUSIGN_BASE_URI }}
+          DOCUSIGN_BASE_URL: ${{ secrets.DOCUSIGN_BASE_URL }}
           DOCUSIGN_ACCOUNT_ID: ${{ secrets.DOCUSIGN_ACCOUNT_ID }}
           DOCUSIGN_SIGNER_EMAIL: ${{ secrets.DOCUSIGN_SIGNER_EMAIL }}
           DOCUSIGN_SIGNER_NAME: ${{ secrets.DOCUSIGN_SIGNER_NAME }}
-          ACCESS_TOKEN: ${{ steps.jwt.outputs.access_token }}
         run: |
+          set -e
+          ACCESS_TOKEN="${{ steps.token.outputs.access_token }}"
           B64="${{ steps.b64.outputs.b64 }}"
           FILENAME="${{ steps.b64.outputs.filename }}"
 
-          if [ -z "$B64" ]; then
-            echo "No base64 content. Aborting."
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "No access token available. Aborting."
             exit 1
           fi
 
-          echo "Creating envelope in DocuSign for $FILENAME"
+          echo "Creating DocuSign envelope for $FILENAME..."
 
           read -r -d '' BODY <<EOF
           {
@@ -144,7 +159,7 @@ jobs:
 
           curl --silent --show-error --fail \
             --request POST \
-            --url "${DOCUSIGN_BASE_URI}/restapi/v2.1/accounts/${DOCUSIGN_ACCOUNT_ID}/envelopes" \
+            --url "${DOCUSIGN_BASE_URL}/restapi/v2.1/accounts/${DOCUSIGN_ACCOUNT_ID}/envelopes" \
             --header "Authorization: Bearer ${ACCESS_TOKEN}" \
             --header "Content-Type: application/json" \
             --data "$BODY"
