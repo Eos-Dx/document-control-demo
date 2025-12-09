@@ -1,4 +1,4 @@
-name: Publish approved PDF to SharePoint (with metadata + hash)
+name: Send approved PDF to DocuSign (JWT)
 
 on:
   push:
@@ -6,9 +6,15 @@ on:
       - main
     paths:
       - "docs/*.pdf"
+  workflow_dispatch:  # Allow manual trigger
+    inputs:
+      pdf_file:
+        description: 'Specific PDF file to send (e.g., SOP-001.pdf)'
+        required: false
+        type: string
 
 jobs:
-  publish_pdf:
+  send_to_docusign:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -16,165 +22,255 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # Need previous commit for diff
 
-      - name: Install tools (hash + PDF metadata)
+      # Setup jq properly instead of apt-get every time
+      - name: Setup jq
+        uses: dcarbone/install-jq-action@v2
+
+      # Find which PDF(s) changed
+      - name: Find target PDF
+        id: pdf
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl jq
-          sudo apt-get install -y libimage-exiftool-perl  # exiftool
+          set -e
 
-      # 1. Находим целевой PDF
-      - name: Detect target PDF
-        id: changed
-        run: |
-          # Сначала пытаемся найти изменённые pdf в этом коммите
-          FILES=$(git diff-tree --no-commit-id --name-only -r $GITHUB_SHA | grep "^docs/.*\.pdf$" || true)
-
-          if [ -z "$FILES" ]; then
-            echo "No changed PDFs detected in commit. Fallback to any PDF in docs/."
-            FILES=$(ls docs/*.pdf 2>/dev/null || true)
-          fi
-
-          if [ -z "$FILES" ]; then
-            echo "No PDF files found in docs/. Nothing to publish."
-            exit 0
-          fi
-
-          echo "PDF candidates:"
-          echo "$FILES"
-
-          FIRST=$(echo "$FILES" | head -n 1)
-          echo "Using PDF: $FIRST"
-          echo "pdf=$FIRST" >> $GITHUB_OUTPUT
-
-      # 2. Вынимаем ID документа и версию (из md)
-      - name: Extract document metadata (ID + version)
-        if: ${{ steps.changed.outputs.pdf != '' }}
-        id: meta
-        run: |
-          PDF_PATH="${{ steps.changed.outputs.pdf }}"
-          echo "PDF_PATH=$PDF_PATH"
-
-          FILENAME=$(basename "$PDF_PATH")        # напр. SOP-ITSM-000-Hello-World.pdf
-          BASENAME="${FILENAME%.pdf}"             # SOP-ITSM-000-Hello-World
-
-          # ID документа: первые три блока через дефис -> SOP-ITSM-000
-          DOC_ID=$(echo "$BASENAME" | cut -d'-' -f1-3)
-
-          # Связанный md-файл: docs/SOP-ITSM-000-Hello-World.md
-          MD_FILE="docs/${BASENAME}.md"
-          VERSION="0.0"
-
-          if [ -f "$MD_FILE" ]; then
-            # Ищем строку вида "version: 0.2" (фронтматтер или обычная)
-            FOUND=$(grep -iE "^version:" "$MD_FILE" | head -n 1 | awk '{print $2}')
-            if [ -n "$FOUND" ]; then
-              VERSION="$FOUND"
+          # Manual trigger with specific file
+          if [ -n "${{ github.event.inputs.pdf_file }}" ]; then
+            PDF_PATH="docs/${{ github.event.inputs.pdf_file }}"
+            if [ -f "$PDF_PATH" ]; then
+              echo "Manual trigger: Using $PDF_PATH"
+              echo "path=$PDF_PATH" >> "$GITHUB_OUTPUT"
+              exit 0
+            else
+              echo "Error: Specified file not found: $PDF_PATH"
+              exit 1
             fi
           fi
 
-          echo "DOC_ID=$DOC_ID"
-          echo "VERSION=$VERSION"
-          echo "BASENAME=$BASENAME"
+          # Automatic trigger: find changed PDFs
+          FILES=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep "^docs/.*\.pdf$" || true)
 
-          echo "doc_id=$DOC_ID" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "basename=$BASENAME" >> $GITHUB_OUTPUT
-          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+          if [ -z "$FILES" ]; then
+            echo "ℹ️ No changed PDFs detected in this commit."
+            echo "Nothing to send to DocuSign."
+            exit 0
+          fi
 
-      # 3. Считаем SHA256 и вписываем метаданные в PDF
-      - name: Compute SHA256 and embed metadata into PDF
-        if: ${{ steps.changed.outputs.pdf != '' }}
-        id: sign
-        run: |
-          PDF_PATH="${{ steps.changed.outputs.pdf }}"
-          DOC_ID="${{ steps.meta.outputs.doc_id }}"
-          VERSION="${{ steps.meta.outputs.version }}"
+          echo "📄 Changed PDFs:"
+          echo "$FILES"
 
-          # SHA256
-          SHA256=$(sha256sum "$PDF_PATH" | awk '{print $1}')
-          SHA_SHORT=$(echo $GITHUB_SHA | cut -c1-8)
-          NOW=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          APPROVER="${{ github.actor }}"
+          # Use first changed PDF
+          FIRST=$(echo "$FILES" | head -n 1)
+          echo "✓ Selected: $FIRST"
+          echo "path=$FIRST" >> "$GITHUB_OUTPUT"
 
-          echo "SHA256=$SHA256"
-          echo "APPROVER=$APPROVER"
-          echo "TIME=$NOW"
-
-          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
-
-          # Метаданные PDF:
-          # Title:   SOP-XXX vY.Y
-          # Subject: Approved SOP document
-          # Author:  <github.actor>
-          # Keywords: APPROVED;DOC_ID=...;VERSION=...;SHA256=...;COMMIT=...;...
-          TITLE="${DOC_ID} v${VERSION}"
-          SUBJECT="Approved SOP document"
-          KEYWORDS="APPROVED;DOC_ID=${DOC_ID};VERSION=${VERSION};SHA256=${SHA256};COMMIT=${SHA_SHORT};PUBLISHED_AT=${NOW};PUBLISHED_BY=${APPROVER}"
-
-          exiftool -overwrite_original \
-            -Title="$TITLE" \
-            -Subject="$SUBJECT" \
-            -Author="$APPROVER" \
-            -Keywords="$KEYWORDS" \
-            "$PDF_PATH"
-
-          # Создаём отдельный .sha256 файл (не коммитим, только для upload)
-          HASH_FILE="docs/${DOC_ID}-v${VERSION}-approved.sha256"
-          {
-            echo "Document=${DOC_ID}-v${VERSION}-approved.pdf"
-            echo "SHA256=${SHA256}"
-            echo "Commit=${GITHUB_SHA}"
-            echo "PublishedBy=${APPROVER}"
-            echo "PublishedAt=${NOW}"
-          } > "$HASH_FILE"
-
-          echo "hash_file=$HASH_FILE" >> $GITHUB_OUTPUT
-
-      # 4. Заливаем PDF и .sha256 в SharePoint (без overwrite)
-      - name: Upload PDF and .sha256 to SharePoint
-        if: ${{ steps.changed.outputs.pdf != '' }}
+      # Generate JWT and get DocuSign access token
+      - name: Get DocuSign access token via JWT
+        if: steps.pdf.outputs.path != ''
+        id: jwt
         env:
-          SP_SITE_URL: ${{ secrets.SP_SITE_URL }}
-          SP_DOC_LIBRARY: ${{ secrets.SP_DOC_LIBRARY }}
-          SP_ROOT_FOLDER: ${{ secrets.SP_ROOT_FOLDER }}
-          SP_USERNAME: ${{ secrets.SP_USERNAME }}
-          SP_PASSWORD: ${{ secrets.SP_PASSWORD }}
+          DOCUSIGN_INTEGRATION_KEY: ${{ secrets.DOCUSIGN_INTEGRATION_KEY }}
+          DOCUSIGN_USER_ID: ${{ secrets.DOCUSIGN_USER_ID }}
+          DOCUSIGN_AUTH_SERVER: ${{ secrets.DOCUSIGN_AUTH_SERVER }}
+          DOCUSIGN_PRIVATE_KEY: ${{ secrets.DOCUSIGN_PRIVATE_KEY }}
         run: |
-          PDF_PATH="${{ steps.changed.outputs.pdf }}"
-          DOC_ID="${{ steps.meta.outputs.doc_id }}"
-          VERSION="${{ steps.meta.outputs.version }}"
-          HASH_FILE="${{ steps.sign.outputs.hash_file }}"
+          set -e
 
-          TARGET_FOLDER="${SP_ROOT_FOLDER}/${DOC_ID}"
-          TARGET_PDF="${DOC_ID}-v${VERSION}-approved.pdf"
-          TARGET_HASH="${DOC_ID}-v${VERSION}-approved.sha256"
+          echo "🔐 Generating JWT for DocuSign authentication..."
 
-          echo "Will upload:"
-          echo "  PDF : $PDF_PATH  → $TARGET_PDF"
-          echo "  HASH: $HASH_FILE → $TARGET_HASH"
-          echo "  Folder: $TARGET_FOLDER"
+          # Save private key to file (will be cleaned up automatically)
+          echo "$DOCUSIGN_PRIVATE_KEY" > private.key
+          chmod 600 private.key
 
-          FOLDER_ENCODED=$(echo "${SP_DOC_LIBRARY}/${TARGET_FOLDER}" | sed 's/ /%20/g')
+          # Token lifetime: 1 hour
+          NOW=$(date +%s)
+          EXP=$((NOW + 3600))
 
-          # 1) PDF. overwrite=false — НЕ перезаписывает существующий approved
-          curl --silent --show-error --fail \
-            --user "$SP_USERNAME:$SP_PASSWORD" \
-            -X POST \
-            -H "accept: application/json;odata=verbose" \
-            -H "content-type: application/octet-stream" \
-            --data-binary @"$PDF_PATH" \
-            "${SP_SITE_URL}/_api/web/GetFolderByServerRelativeUrl('${FOLDER_ENCODED}')/Files/add(url='${TARGET_PDF}',overwrite=false)"
+          # Build JWT components
+          HEADER='{"alg":"RS256","typ":"JWT"}'
+          PAYLOAD=$(cat <<EOF
+{"iss":"$DOCUSIGN_INTEGRATION_KEY","sub":"$DOCUSIGN_USER_ID","aud":"$DOCUSIGN_AUTH_SERVER","scope":"signature impersonation","exp":$EXP}
+EOF
+          )
 
-          echo "PDF upload complete."
+          # Base64url encoding function
+          b64url() {
+            openssl base64 -e -A | tr '+/' '-_' | tr -d '='
+          }
 
-          # 2) .sha256. Тоже без overwrite — каждая версия уникальна
-          curl --silent --show-error --fail \
-            --user "$SP_USERNAME:$SP_PASSWORD" \
-            -X POST \
-            -H "accept: application/json;odata=verbose" \
-            -H "content-type: text/plain" \
-            --data-binary @"$HASH_FILE" \
-            "${SP_SITE_URL}/_api/web/GetFolderByServerRelativeUrl('${FOLDER_ENCODED}')/Files/add(url='${TARGET_HASH}',overwrite=false)"
+          # Encode header and payload
+          HEADER_B64=$(printf '%s' "$HEADER" | b64url)
+          PAYLOAD_B64=$(printf '%s' "$PAYLOAD" | b64url)
+          DATA="$HEADER_B64.$PAYLOAD_B64"
 
-          echo "SHA256 file upload complete."
+          # Sign with RSA-SHA256
+          SIGNATURE=$(printf '%s' "$DATA" \
+            | openssl dgst -sha256 -sign private.key \
+            | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
+
+          JWT="$DATA.$SIGNATURE"
+
+          echo "🌐 Requesting access token from DocuSign..."
+
+          # Request access token
+          RESPONSE=$(curl --silent --show-error --fail \
+            --request POST \
+            --url "https://${DOCUSIGN_AUTH_SERVER}/oauth/token" \
+            --header "Content-Type: application/x-www-form-urlencoded" \
+            --data "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${JWT}")
+
+          ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
+
+          if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
+            echo "❌ Failed to obtain access token"
+            echo "Response: $RESPONSE"
+            exit 1
+          fi
+
+          echo "✓ Access token obtained"
+
+          # Mask token in logs and save to output
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
+
+          # Cleanup
+          rm -f private.key
+
+      # Prepare PDF (save to file instead of GITHUB_OUTPUT to avoid size limits)
+      - name: Prepare PDF
+        if: steps.pdf.outputs.path != ''
+        id: prepare
+        run: |
+          set -e
+
+          PDF_PATH="${{ steps.pdf.outputs.path }}"
+
+          if [ ! -f "$PDF_PATH" ]; then
+            echo "❌ Error: PDF file not found: $PDF_PATH"
+            exit 1
+          fi
+
+          FILENAME=$(basename "$PDF_PATH")
+          FILESIZE=$(stat -f%z "$PDF_PATH" 2>/dev/null || stat -c%s "$PDF_PATH" 2>/dev/null)
+          FILESIZE_MB=$(echo "scale=2; $FILESIZE / 1048576" | bc)
+
+          echo "📄 PDF Details:"
+          echo "  Path: $PDF_PATH"
+          echo "  Filename: $FILENAME"
+          echo "  Size: ${FILESIZE_MB} MB"
+
+          # Encode to base64 and save to file
+          echo "🔄 Encoding PDF to base64..."
+          base64 -w0 "$PDF_PATH" > pdf_base64.txt
+
+          # Verify base64 encoding
+          B64_SIZE=$(stat -f%z pdf_base64.txt 2>/dev/null || stat -c%s pdf_base64.txt 2>/dev/null)
+          echo "  Base64 size: $B64_SIZE bytes"
+
+          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+          echo "✓ PDF prepared for DocuSign"
+
+      # Send envelope to DocuSign
+      - name: Send envelope to DocuSign
+        if: steps.pdf.outputs.path != ''
+        env:
+          DOCUSIGN_BASE_URI: ${{ secrets.DOCUSIGN_BASE_URI }}
+          DOCUSIGN_ACCOUNT_ID: ${{ secrets.DOCUSIGN_ACCOUNT_ID }}
+          DOCUSIGN_SIGNER_EMAIL: ${{ secrets.DOCUSIGN_SIGNER_EMAIL }}
+          DOCUSIGN_SIGNER_NAME: ${{ secrets.DOCUSIGN_SIGNER_NAME }}
+        run: |
+          set -e
+
+          ACCESS_TOKEN="${{ steps.jwt.outputs.token }}"
+          B64=$(cat pdf_base64.txt)
+          FILENAME="${{ steps.prepare.outputs.filename }}"
+
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "❌ No access token available"
+            exit 1
+          fi
+
+          echo "📤 Creating envelope in DocuSign..."
+          echo "  Document: $FILENAME"
+          echo "  Signer: $DOCUSIGN_SIGNER_NAME <$DOCUSIGN_SIGNER_EMAIL>"
+
+          # Build JSON payload using jq for proper escaping
+          PAYLOAD=$(jq -n \
+            --arg subject "Please sign: $FILENAME" \
+            --arg doc_b64 "$B64" \
+            --arg doc_name "$FILENAME" \
+            --arg signer_email "$DOCUSIGN_SIGNER_EMAIL" \
+            --arg signer_name "$DOCUSIGN_SIGNER_NAME" \
+            '{
+              emailSubject: $subject,
+              documents: [{
+                documentBase64: $doc_b64,
+                name: $doc_name,
+                fileExtension: "pdf",
+                documentId: "1"
+              }],
+              recipients: {
+                signers: [{
+                  email: $signer_email,
+                  name: $signer_name,
+                  recipientId: "1",
+                  routingOrder: "1",
+                  tabs: {
+                    signHereTabs: [{
+                      documentId: "1",
+                      pageNumber: "1",
+                      xPosition: "100",
+                      yPosition: "100"
+                    }]
+                  }
+                }]
+              },
+              status: "sent"
+            }')
+
+          # Send to DocuSign
+          RESPONSE=$(curl --silent --show-error --fail \
+            --request POST \
+            --url "${DOCUSIGN_BASE_URI}/restapi/v2.1/accounts/${DOCUSIGN_ACCOUNT_ID}/envelopes" \
+            --header "Authorization: Bearer ${ACCESS_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data "$PAYLOAD")
+
+          # Parse response
+          ENVELOPE_ID=$(echo "$RESPONSE" | jq -r '.envelopeId')
+          STATUS=$(echo "$RESPONSE" | jq -r '.status')
+
+          if [ -z "$ENVELOPE_ID" ] || [ "$ENVELOPE_ID" = "null" ]; then
+            echo "❌ Failed to create envelope"
+            echo "Response: $RESPONSE"
+            exit 1
+          fi
+
+          echo "✅ Envelope created successfully!"
+          echo "  Envelope ID: $ENVELOPE_ID"
+          echo "  Status: $STATUS"
+          echo ""
+          echo "📧 Signature request has been sent to:"
+          echo "  → $DOCUSIGN_SIGNER_NAME <$DOCUSIGN_SIGNER_EMAIL>"
+          echo ""
+          echo "🔒 Part 11 Compliant Process:"
+          echo "  ✓ Document frozen in PDF format"
+          echo "  ✓ Electronic signature with audit trail"
+          echo "  ✓ Signer authentication via DocuSign"
+          echo "  ✓ Certificate of Completion will be generated"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f pdf_base64.txt private.key
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -n "${{ steps.pdf.outputs.path }}" ]; then
+            echo "✅ DocuSign workflow completed"
+            echo "📄 Document: ${{ steps.prepare.outputs.filename }}"
+          else
+            echo "ℹ️ No PDFs to process"
+          fi
