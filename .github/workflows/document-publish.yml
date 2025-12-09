@@ -1,31 +1,34 @@
-name: Send approved PDF to DocuSign (JWT)
+name: Send approved PDF to DocuSign
 
 on:
   pull_request:
     types: [closed]
     branches:
       - main
-    paths:
-      - "docs/*.pdf"
 
 jobs:
-  send_to_docusign:
+  publish_to_docusign:
+    if: ${{ github.event.pull_request.merged == true }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Find changed PDF in this push
+      - name: Find PDF changed in this merge
         id: pdf
         run: |
-          set -e
-          FILES=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep "^docs/.*\.pdf$" || true)
+          MERGE_SHA="${{ github.event.pull_request.merge_commit_sha }}"
+          echo "Merge commit: $MERGE_SHA"
+
+          FILES=$(git diff-tree --no-commit-id --name-only -r "$MERGE_SHA" | grep "^docs/.*\.pdf$" || true)
 
           if [ -z "$FILES" ]; then
-            echo "ℹ️ No changed PDFs in docs/ for this commit. Nothing to send."
+            echo "No PDF changes detected in docs/ for this merge. Nothing to send."
             exit 0
           fi
 
@@ -34,104 +37,86 @@ jobs:
 
           FIRST=$(echo "$FILES" | head -n 1)
           echo "Using PDF: $FIRST"
-          echo "path=$FIRST" >> "$GITHUB_OUTPUT"
+          echo "path=$FIRST" >> $GITHUB_OUTPUT
 
-      - name: Base64 encode PDF
+      - name: Prepare PDF as base64
         if: ${{ steps.pdf.outputs.path != '' }}
         id: b64
         run: |
-          set -e
           PDF_PATH="${{ steps.pdf.outputs.path }}"
           echo "PDF_PATH=$PDF_PATH"
 
           B64=$(base64 -w0 "$PDF_PATH")
           FILENAME=$(basename "$PDF_PATH")
 
-          echo "b64=$B64" >> "$GITHUB_OUTPUT"
-          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+          echo "b64=$B64" >> $GITHUB_OUTPUT
+          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
 
       - name: Get DocuSign access token via JWT
         if: ${{ steps.pdf.outputs.path != '' }}
-        id: token
+        id: auth
         env:
-          DOCUSIGN_AUTH_SERVER: ${{ secrets.DOCUSIGN_AUTH_SERVER }}
+          DOCUSIGN_AUTH_SERVER: ${{ secrets.DOCUSIGN_AUTH_SERVER }}   # например account-d.docusign.com
           DOCUSIGN_INTEGRATION_KEY: ${{ secrets.DOCUSIGN_INTEGRATION_KEY }}
           DOCUSIGN_USER_ID: ${{ secrets.DOCUSIGN_USER_ID }}
-          DOCUSIGN_RSA_PRIVATE_KEY: ${{ secrets.DOCUSIGN_RSA_PRIVATE_KEY }}
+          DOCUSIGN_PRIVATE_KEY: ${{ secrets.DOCUSIGN_PRIVATE_KEY }}
         run: |
-          set -e
+          python -m pip install --quiet pyjwt requests
 
-          # Сохраняем приватный ключ во временный файл
-          echo "Writing RSA private key to file..."
-          printf '%s\n' "$DOCUSIGN_RSA_PRIVATE_KEY" > docusign_private.key
+          ACCESS_TOKEN=$(python - << 'PY'
+import os, time, sys, jwt, requests
 
-          # JWT заголовок и payload
-          HEADER='{"alg":"RS256","typ":"JWT"}'
+integration_key = os.environ["DOCUSIGN_INTEGRATION_KEY"]
+user_id        = os.environ["DOCUSIGN_USER_ID"]
+auth_server    = os.environ.get("DOCUSIGN_AUTH_SERVER", "account-d.docusign.com")
+private_key    = os.environ["DOCUSIGN_PRIVATE_KEY"].replace("\\n", "\n")
 
-          NOW=$(date +%s)
-          EXP=$((NOW + 3600)) # токен на 1 час
+now = int(time.time())
+payload = {
+    "iss": integration_key,
+    "sub": user_id,
+    "aud": auth_server,
+    "scope": "signature impersonation",
+    "iat": now,
+    "exp": now + 3600,
+}
 
-          # Для demo-окружения aud = account-d.docusign.com
-          PAYLOAD=$(cat <<EOF
-          {
-            "iss": "${DOCUSIGN_INTEGRATION_KEY}",
-            "sub": "${DOCUSIGN_USER_ID}",
-            "aud": "account-d.docusign.com",
-            "iat": ${NOW},
-            "exp": ${EXP},
-            "scope": "signature impersonation"
-          }
-          EOF
+token = jwt.encode(payload, private_key, algorithm="RS256")
+
+resp = requests.post(
+    f"https://{auth_server}/oauth/token",
+    data={
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": token,
+    },
+)
+resp.raise_for_status()
+access_token = resp.json()["access_token"]
+print(access_token)
+PY
           )
 
-          b64url() {
-            openssl base64 -e -A | tr '+/' '-_' | tr -d '='
-          }
-
-          HEADER_B64=$(printf '%s' "$HEADER" | b64url)
-          PAYLOAD_B64=$(printf '%s' "$PAYLOAD" | b64url)
-          DATA="${HEADER_B64}.${PAYLOAD_B64}"
-
-          SIG=$(printf '%s' "$DATA" | openssl dgst -sha256 -sign docusign_private.key | b64url)
-          JWT="${DATA}.${SIG}"
-
-          echo "Requesting access token from ${DOCUSIGN_AUTH_SERVER}..."
-          RESP=$(curl --silent --show-error --fail \
-            --request POST \
-            --url "${DOCUSIGN_AUTH_SERVER}/oauth/token" \
-            --header "Content-Type: application/x-www-form-urlencoded" \
-            --data "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${JWT}")
-
-          ACCESS_TOKEN=$(echo "$RESP" | jq -r '.access_token')
-
-          if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
-            echo "Failed to obtain access token. Response:"
-            echo "$RESP"
-            exit 1
-          fi
-
-          echo "Access token obtained."
-          echo "access_token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "token=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
 
       - name: Send envelope to DocuSign
         if: ${{ steps.pdf.outputs.path != '' }}
         env:
-          DOCUSIGN_BASE_URL: ${{ secrets.DOCUSIGN_BASE_URL }}
+          DOCUSIGN_BASE_URI:   ${{ secrets.DOCUSIGN_BASE_URI }}      # https://demo.docusign.net
           DOCUSIGN_ACCOUNT_ID: ${{ secrets.DOCUSIGN_ACCOUNT_ID }}
           DOCUSIGN_SIGNER_EMAIL: ${{ secrets.DOCUSIGN_SIGNER_EMAIL }}
-          DOCUSIGN_SIGNER_NAME: ${{ secrets.DOCUSIGN_SIGNER_NAME }}
+          DOCUSIGN_SIGNER_NAME:  ${{ secrets.DOCUSIGN_SIGNER_NAME }}
+          ACCESS_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
-          set -e
-          ACCESS_TOKEN="${{ steps.token.outputs.access_token }}"
           B64="${{ steps.b64.outputs.b64 }}"
           FILENAME="${{ steps.b64.outputs.filename }}"
 
-          if [ -z "$ACCESS_TOKEN" ]; then
-            echo "No access token available. Aborting."
+          if [ -z "$B64" ]; then
+            echo "No base64 content. Aborting."
             exit 1
           fi
 
-          echo "Creating DocuSign envelope for $FILENAME..."
+          echo "Creating DocuSign envelope for $FILENAME"
 
           read -r -d '' BODY <<EOF
           {
@@ -160,7 +145,7 @@ jobs:
 
           curl --silent --show-error --fail \
             --request POST \
-            --url "${DOCUSIGN_BASE_URL}/restapi/v2.1/accounts/${DOCUSIGN_ACCOUNT_ID}/envelopes" \
+            --url "${DOCUSIGN_BASE_URI}/restapi/v2.1/accounts/${DOCUSIGN_ACCOUNT_ID}/envelopes" \
             --header "Authorization: Bearer ${ACCESS_TOKEN}" \
             --header "Content-Type: application/json" \
             --data "$BODY"
