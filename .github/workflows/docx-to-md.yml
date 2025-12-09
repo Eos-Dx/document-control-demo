@@ -104,15 +104,16 @@ jobs:
           
           COMMIT_MSG="docs: Automated DOCX to MD/PDF conversion
 
-Converted ${{ steps.convert.outputs.files_converted }} document(s)
-- Generated Markdown and PDF outputs
-- Archived previous versions with timestamp
+          Converted ${{ steps.convert.outputs.files_converted }} document(s)
+          - Generated Markdown and PDF outputs
+          - Archived previous versions with timestamp
 
-[skip ci]"
-          
+          [skip ci]"
+
           git commit -m "$COMMIT_MSG"
-          
+
           git push
+
 
       - name: Summary
         if: always()
