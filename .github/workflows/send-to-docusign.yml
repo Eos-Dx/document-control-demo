@@ -7,8 +7,7 @@ on:
     paths:
       - "docs/*.pdf"
   pull_request:
-    types:
-      - closed
+    types: [closed]
     branches:
       - main
     paths:
