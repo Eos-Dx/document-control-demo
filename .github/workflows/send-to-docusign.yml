@@ -15,20 +15,19 @@ on:
   workflow_dispatch:
     inputs:
       pdf_file:
-        description: 'PDF in docs/ to send (e.g., SOP-ITSM-000-Hello-World.pdf)'
+        description: 'Specific PDF file to send (e.g., SOP-001.pdf)'
         required: false
         type: string
 
 jobs:
   send_to_docusign:
     runs-on: ubuntu-latest
-    # Для PR-событий – только если PR реально смёрджен
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
     permissions:
       contents: read
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
@@ -41,7 +40,7 @@ jobs:
         run: |
           set -e
 
-          # 1) Ручной запуск через workflow_dispatch
+          # 1) Manual trigger via workflow_dispatch
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.pdf_file }}" ]; then
             PDF_PATH="docs/${{ github.event.inputs.pdf_file }}"
             if [ -f "$PDF_PATH" ]; then
@@ -54,11 +53,11 @@ jobs:
             fi
           fi
 
-          # 2) Автоматический запуск при merge PR → берём PDF, изменённые в merge-коммите
+          # 2) Automatic trigger on push or PR merge
           FILES=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" -- "docs/*.pdf" || true)
 
           if [ -z "$FILES" ]; then
-            echo "No changed PDFs detected in this merge commit."
+            echo "No changed PDFs detected."
             exit 0
           fi
 
@@ -68,6 +67,18 @@ jobs:
           FIRST=$(echo "$FILES" | head -n 1)
           echo "Using: $FIRST"
           echo "path=$FIRST" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure PDF exists
+        if: steps.pdf.outputs.path == ''
+        run: |
+          echo "No approved PDF to send. Skipping DocuSign step."
+          exit 0
+
+      - name: Show selected PDF
+        if: steps.pdf.outputs.path != ''
+        run: |
+          echo "Selected PDF: ${{ steps.pdf.outputs.path }}"
+          ls -lh "${{ steps.pdf.outputs.path }}"
 
       - name: Get DocuSign access token (JWT)
         if: steps.pdf.outputs.path != ''
@@ -82,9 +93,7 @@ jobs:
 
           echo "Generating JWT..."
 
-          cat <<EOF > private.key
-${DOCUSIGN_PRIVATE_KEY}
-EOF
+          echo "$DOCUSIGN_PRIVATE_KEY" > private.key
           chmod 600 private.key
 
           NOW=$(date +%s)
@@ -99,34 +108,32 @@ EOF
 
           HEADER_B64=$(printf '%s' "$HEADER" | b64url)
           PAYLOAD_B64=$(printf '%s' "$PAYLOAD" | b64url)
-          DATA="$HEADER_B64.$PAYLOAD_B64"
 
-          SIGNATURE=$(printf '%s' "$DATA" | openssl dgst -sha256 -sign private.key | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
-          JWT="$DATA.$SIGNATURE"
+          SIGNING_INPUT="${HEADER_B64}.${PAYLOAD_B64}"
 
-          echo "Requesting token..."
+          SIGNATURE=$(printf '%s' "$SIGNING_INPUT" | \
+            openssl dgst -sha256 -sign private.key | b64url)
 
-          RESPONSE=$(curl --silent --show-error --fail \
-            --request POST \
-            --url "${DOCUSIGN_AUTH_SERVER}/oauth/token" \
+          JWT="${SIGNING_INPUT}.${SIGNATURE}"
+
+          echo "Requesting access token from DocuSign..."
+
+          RESPONSE=$(curl -sS --request POST "https://${DOCUSIGN_AUTH_SERVER}/oauth/token" \
             --header "Content-Type: application/x-www-form-urlencoded" \
-            --data "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${JWT}")
+            --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" \
+            --data-urlencode "assertion=${JWT}")
 
           ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
 
           if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
-            echo "Failed to get token"
+            echo "Failed to obtain access token"
             echo "$RESPONSE"
             exit 1
           fi
 
-          echo "Token obtained"
-          echo "::add-mask::$ACCESS_TOKEN"
-          echo "token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
+          echo "access_token=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
 
-          rm -f private.key
-
-      - name: Prepare PDF (base64)
+      - name: Prepare PDF
         if: steps.pdf.outputs.path != ''
         id: prepare
         run: |
@@ -149,10 +156,10 @@ EOF
       - name: Send to DocuSign
         if: steps.pdf.outputs.path != ''
         env:
-          DOCUSIGN_BASE_URI:      ${{ secrets.DOCUSIGN_BASE_URI }}
-          DOCUSIGN_ACCOUNT_ID:    ${{ secrets.DOCUSIGN_ACCOUNT_ID }}
-          DOCUSIGN_SIGNER_EMAIL:  ${{ secrets.DOCUSIGN_SIGNER_EMAIL }}
-          DOCUSIGN_SIGNER_NAME:   ${{ secrets.DOCUSIGN_SIGNER_NAME }}
+          DOCUSIGN_BASE_URI: ${{ secrets.DOCUSIGN_BASE_URI }}
+          DOCUSIGN_ACCOUNT_ID: ${{ secrets.DOCUSIGN_ACCOUNT_ID }}
+          DOCUSIGN_SIGNER_EMAIL: ${{ secrets.DOCUSIGN_SIGNER_EMAIL }}
+          DOCUSIGN_SIGNER_NAME: ${{ secrets.DOCUSIGN_SIGNER_NAME }}
         run: |
           set -e
 
@@ -161,7 +168,7 @@ EOF
           FILENAME="${{ steps.prepare.outputs.filename }}"
 
           if [ -z "$ACCESS_TOKEN" ]; then
-            echo "No access token"
+            echo "No token"
             exit 1
           fi
 
