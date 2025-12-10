@@ -186,6 +186,10 @@ jobs:
 
           echo "Creating envelope for $FILENAME..."
 
+          echo "Debug: ACCESS_TOKEN length: ${#ACCESS_TOKEN}"
+          echo "Debug: BASE_URI: ${DOCUSIGN_BASE_URI}"
+          echo "Debug: ACCOUNT_ID: ${DOCUSIGN_ACCOUNT_ID}"
+
           PAYLOAD=$(jq -n \
             --arg subject "Please sign: $FILENAME" \
             --arg doc_b64 "$B64" \
@@ -219,18 +223,33 @@ jobs:
               status: "sent"
             }')
 
-          RESPONSE=$(curl --silent --show-error --fail \
+          echo "Sending request to DocuSign..."
+
+          RESPONSE=$(curl --silent --show-error --write-out "\nHTTP_CODE:%{http_code}" \
             --request POST \
             --url "${DOCUSIGN_BASE_URI}/restapi/v2.1/accounts/${DOCUSIGN_ACCOUNT_ID}/envelopes" \
             --header "Authorization: Bearer ${ACCESS_TOKEN}" \
             --header "Content-Type: application/json" \
             --data "$PAYLOAD")
 
-          ENVELOPE_ID=$(echo "$RESPONSE" | jq -r '.envelopeId')
+          HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+          BODY=$(echo "$RESPONSE" | sed '/HTTP_CODE:/d')
+
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response Body:"
+          echo "$BODY"
+
+          if [ "$HTTP_CODE" != "201" ]; then
+            echo "❌ Failed to create envelope (HTTP $HTTP_CODE)"
+            echo "Full response: $BODY"
+            exit 1
+          fi
+
+          ENVELOPE_ID=$(echo "$BODY" | jq -r '.envelopeId')
 
           if [ -z "$ENVELOPE_ID" ] || [ "$ENVELOPE_ID" = "null" ]; then
-            echo "Failed to create envelope"
-            echo "$RESPONSE"
+            echo "Failed to extract envelope ID"
+            echo "$BODY"
             exit 1
           fi
 
