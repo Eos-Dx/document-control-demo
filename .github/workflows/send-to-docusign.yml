@@ -7,7 +7,8 @@ on:
     paths:
       - "docs/*.pdf"
   pull_request:
-    types: [closed]
+    types:
+      - closed
     branches:
       - main
     paths:
@@ -15,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       pdf_file:
-        description: 'PDF in docs/ to send (e.g., SOP-ITSM-000-Hello-World.pdf)'
+        description: 'Specific PDF file to send (e.g., SOP-001.pdf)'
         required: false
         type: string
 
@@ -82,7 +83,9 @@ jobs:
 
           echo "Generating JWT..."
 
-          echo "$DOCUSIGN_PRIVATE_KEY" > private.key
+          cat <<EOF > private.key
+${DOCUSIGN_PRIVATE_KEY}
+EOF
           chmod 600 private.key
 
           NOW=$(date +%s)
