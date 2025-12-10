@@ -5,7 +5,14 @@ on:
     types:
       - closed
     branches:
+      - master
       - main
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "docs/*.pdf"
 
 jobs:
   send_to_docusign:
