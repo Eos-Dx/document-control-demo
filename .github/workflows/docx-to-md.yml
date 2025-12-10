@@ -63,6 +63,7 @@ jobs:
           git config user.name "doc-bot"
           git config user.email "doc-bot@example.com"
 
-          git add docs/*.md docs/*.pdf archive/*
+          git add docs/*.md docs/*.pdf
+          git add -f archive/* || true
           git commit -m "Auto: convert DOCX to MD+PDF"
           git push origin HEAD
