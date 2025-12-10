@@ -8,6 +8,7 @@
 .alpackages/
 #Snapshots folder
 .snapshots/
+archive/
 #Testing Output folder
 .output/
 .idea

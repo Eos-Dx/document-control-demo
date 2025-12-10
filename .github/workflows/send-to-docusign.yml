@@ -1,14 +1,8 @@
 name: Send approved PDF to DocuSign
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "docs/*.pdf"
   pull_request:
-    types:
-      - closed
+    types: [closed]
     branches:
       - main
     paths:
@@ -16,14 +10,15 @@ on:
   workflow_dispatch:
     inputs:
       pdf_file:
-        description: 'Specific PDF file to send (e.g., SOP-001.pdf)'
+        description: 'PDF in docs/ to send (e.g., SOP-ITSM-000-Hello-World.pdf)'
         required: false
         type: string
 
 jobs:
   send_to_docusign:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
+    # Для PR-событий – только если PR реально смёрджен
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     permissions:
       contents: read
 
@@ -41,22 +36,24 @@ jobs:
         run: |
           set -e
 
-          if [ -n "${{ github.event.inputs.pdf_file }}" ]; then
+          # 1) Ручной запуск через workflow_dispatch
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.pdf_file }}" ]; then
             PDF_PATH="docs/${{ github.event.inputs.pdf_file }}"
             if [ -f "$PDF_PATH" ]; then
-              echo "Manual trigger: Using $PDF_PATH"
+              echo "Manual trigger: using $PDF_PATH"
               echo "path=$PDF_PATH" >> "$GITHUB_OUTPUT"
               exit 0
             else
-              echo "Error: File not found: $PDF_PATH"
+              echo "Error: file not found: $PDF_PATH"
               exit 1
             fi
           fi
 
-          FILES=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep "^docs/.*\.pdf$" || true)
+          # 2) Автоматический запуск при merge PR → берём PDF, изменённые в merge-коммите
+          FILES=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" -- "docs/*.pdf" || true)
 
           if [ -z "$FILES" ]; then
-            echo "No changed PDFs detected."
+            echo "No changed PDFs detected in this merge commit."
             exit 0
           fi
 
@@ -67,20 +64,22 @@ jobs:
           echo "Using: $FIRST"
           echo "path=$FIRST" >> "$GITHUB_OUTPUT"
 
-      - name: Get DocuSign access token
+      - name: Get DocuSign access token (JWT)
         if: steps.pdf.outputs.path != ''
         id: jwt
         env:
           DOCUSIGN_INTEGRATION_KEY: ${{ secrets.DOCUSIGN_INTEGRATION_KEY }}
-          DOCUSIGN_USER_ID: ${{ secrets.DOCUSIGN_USER_ID }}
-          DOCUSIGN_AUTH_SERVER: ${{ secrets.DOCUSIGN_AUTH_SERVER }}
-          DOCUSIGN_PRIVATE_KEY: ${{ secrets.DOCUSIGN_PRIVATE_KEY }}
+          DOCUSIGN_USER_ID:        ${{ secrets.DOCUSIGN_USER_ID }}
+          DOCUSIGN_AUTH_SERVER:    ${{ secrets.DOCUSIGN_AUTH_SERVER }}
+          DOCUSIGN_PRIVATE_KEY:    ${{ secrets.DOCUSIGN_PRIVATE_KEY }}
         run: |
           set -e
 
           echo "Generating JWT..."
 
-          echo "$DOCUSIGN_PRIVATE_KEY" > private.key
+          cat <<EOF > private.key
+${DOCUSIGN_PRIVATE_KEY}
+EOF
           chmod 600 private.key
 
           NOW=$(date +%s)
@@ -122,7 +121,7 @@ jobs:
 
           rm -f private.key
 
-      - name: Prepare PDF
+      - name: Prepare PDF (base64)
         if: steps.pdf.outputs.path != ''
         id: prepare
         run: |
@@ -145,10 +144,10 @@ jobs:
       - name: Send to DocuSign
         if: steps.pdf.outputs.path != ''
         env:
-          DOCUSIGN_BASE_URI: ${{ secrets.DOCUSIGN_BASE_URI }}
-          DOCUSIGN_ACCOUNT_ID: ${{ secrets.DOCUSIGN_ACCOUNT_ID }}
-          DOCUSIGN_SIGNER_EMAIL: ${{ secrets.DOCUSIGN_SIGNER_EMAIL }}
-          DOCUSIGN_SIGNER_NAME: ${{ secrets.DOCUSIGN_SIGNER_NAME }}
+          DOCUSIGN_BASE_URI:      ${{ secrets.DOCUSIGN_BASE_URI }}
+          DOCUSIGN_ACCOUNT_ID:    ${{ secrets.DOCUSIGN_ACCOUNT_ID }}
+          DOCUSIGN_SIGNER_EMAIL:  ${{ secrets.DOCUSIGN_SIGNER_EMAIL }}
+          DOCUSIGN_SIGNER_NAME:   ${{ secrets.DOCUSIGN_SIGNER_NAME }}
         run: |
           set -e
 
@@ -157,7 +156,7 @@ jobs:
           FILENAME="${{ steps.prepare.outputs.filename }}"
 
           if [ -z "$ACCESS_TOKEN" ]; then
-            echo "No token"
+            echo "No access token"
             exit 1
           fi
 
@@ -216,4 +215,4 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -f pdf_base64.txt private.key
+        run: rm -f pdf_base64.txt private.key || true
