@@ -1,16 +1,9 @@
 name: Send approved PDF to DocuSign
 
 on:
-  pull_request:
-    types:
-      - closed
-    branches:
-      - master
-      - main
   push:
     branches:
       - main
-      - master
     paths:
       - "docs/*.pdf"
 
