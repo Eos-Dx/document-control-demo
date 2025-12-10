@@ -14,60 +14,60 @@ on:
       - "docs/*.pdf"
   workflow_dispatch:
     inputs:
-      pdf_file:
-        description: 'Specific PDF file to send (e.g., SOP-001.pdf)'
-        required: false
-        type: string
+...
 
 jobs:
-  send_to_docusign:
+  send-to-docusign:
     runs-on: ubuntu-latest
-    # Для PR-событий – только если PR реально смёрджен
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+
     permissions:
       contents: read
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
 
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Find target PDF
+      - name: Find latest approved PDF
         id: pdf
         run: |
           set -e
 
-          # 1) Ручной запуск через workflow_dispatch
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.pdf_file }}" ]; then
-            PDF_PATH="docs/${{ github.event.inputs.pdf_file }}"
-            if [ -f "$PDF_PATH" ]; then
-              echo "Manual trigger: using $PDF_PATH"
-              echo "path=$PDF_PATH" >> "$GITHUB_OUTPUT"
-              exit 0
-            else
-              echo "Error: file not found: $PDF_PATH"
-              exit 1
-            fi
-          fi
+          echo "Searching for latest approved PDF..."
 
-          # 2) Автоматический запуск при merge PR → берём PDF, изменённые в merge-коммите
-          FILES=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" -- "docs/*.pdf" || true)
+          # Находим последний коммит, где в PR был label "approved"
+          LAST_APPROVED_COMMIT=$(git log -1 --format="%H" --grep="\[approved\]")
 
-          if [ -z "$FILES" ]; then
-            echo "No changed PDFs detected in this merge commit."
+          if [ -z "$LAST_APPROVED_COMMIT" ]; then
+            echo "No approved PDF found."
+            echo "path=" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          echo "Changed PDFs:"
-          echo "$FILES"
+          echo "Found approved commit: $LAST_APPROVED_COMMIT"
 
-          FIRST=$(echo "$FILES" | head -n 1)
-          echo "Using: $FIRST"
-          echo "path=$FIRST" >> "$GITHUB_OUTPUT"
+          # Ищем изменённые pdf-файлы в том коммите
+          PDF_FILE=$(git diff-tree --no-commit-id --name-only -r "$LAST_APPROVED_COMMIT" -- "docs/*.pdf" | head -n 1 || true)
+
+          if [ -z "$PDF_FILE" ]; then
+            echo "No PDF file found in approved commit."
+            echo "path=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Using PDF file: $PDF_FILE"
+          echo "path=$PDF_FILE" >> $GITHUB_OUTPUT
+
+      - name: Ensure PDF exists
+        if: steps.pdf.outputs.path == ''
+        run: |
+          echo "No approved PDF to send. Skipping DocuSign step."
+          exit 0
+
+      - name: Show selected PDF
+        if: steps.pdf.outputs.path != ''
+        run: |
+          echo "Selected PDF: ${{ steps.pdf.outputs.path }}"
+          ls -lh "${{ steps.pdf.outputs.path }}"
 
       - name: Get DocuSign access token (JWT)
         if: steps.pdf.outputs.path != ''
@@ -83,15 +83,15 @@ jobs:
           echo "Generating JWT..."
 
           cat <<EOF > private.key
-${DOCUSIGN_PRIVATE_KEY}
-EOF
+          ${DOCUSIGN_PRIVATE_KEY}
+          EOF
           chmod 600 private.key
 
           NOW=$(date +%s)
           EXP=$((NOW + 3600))
 
           HEADER='{"alg":"RS256","typ":"JWT"}'
-          PAYLOAD="{\"iss\":\"${DOCUSIGN_INTEGRATION_KEY}\",\"sub\":\"${DOCUSIGN_USER_ID}\",\"aud\":\"${DOCUSIGN_AUTH_SERVER}\",\"scope\":\"signature impersonation\",\"exp\":${EXP}}"
+          PAYLOAD="{\"iss\":\"${DOCUSIGN_INTEGRATION_KEY}...\",\"scope\":\"signature impersonation\",\"exp\":${EXP}}"
 
           b64url() {
             openssl base64 -e -A | tr '+/' '-_' | tr -d '='
@@ -99,82 +99,71 @@ EOF
 
           HEADER_B64=$(printf '%s' "$HEADER" | b64url)
           PAYLOAD_B64=$(printf '%s' "$PAYLOAD" | b64url)
-          DATA="$HEADER_B64.$PAYLOAD_B64"
 
-          SIGNATURE=$(printf '%s' "$DATA" | openssl dgst -sha256 -sign private.key | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
-          JWT="$DATA.$SIGNATURE"
+          SIGNING_INPUT="${HEADER_B64}.${PAYLOAD_B64}"
 
-          echo "Requesting token..."
+          SIGNATURE=$(printf '%s' "$SIGNING_INPUT" | \
+            openssl dgst -sha256 -sign private.key | b64url)
 
-          RESPONSE=$(curl --silent --show-error --fail \
-            --request POST \
-            --url "${DOCUSIGN_AUTH_SERVER}/oauth/token" \
+          JWT="${SIGNING_INPUT}.${SIGNATURE}"
+
+          echo "Requesting access token from DocuSign..."
+
+          RESPONSE=$(curl -sS --request POST "https://${DOCUSIGN_AUTH_SERVER}/oauth/token" \
             --header "Content-Type: application/x-www-form-urlencoded" \
-            --data "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${JWT}")
+            --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" \
+            --data-urlencode "assertion=${JWT}")
 
           ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
 
           if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
-            echo "Failed to get token"
+            echo "Failed to obtain access token"
             echo "$RESPONSE"
             exit 1
           fi
 
-          echo "Token obtained"
-          echo "::add-mask::$ACCESS_TOKEN"
-          echo "token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
+          echo "access_token=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
 
-          rm -f private.key
-
-      - name: Prepare PDF (base64)
+      - name: Convert PDF to Base64
         if: steps.pdf.outputs.path != ''
-        id: prepare
+        id: pdf_b64
         run: |
           set -e
 
           PDF_PATH="${{ steps.pdf.outputs.path }}"
 
-          if [ ! -f "$PDF_PATH" ]; then
-            echo "PDF not found: $PDF_PATH"
-            exit 1
-          fi
-
-          FILENAME=$(basename "$PDF_PATH")
-          echo "Encoding $FILENAME..."
+          echo "Converting PDF to Base64: $PDF_PATH"
 
           base64 -w0 "$PDF_PATH" > pdf_base64.txt
 
-          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+          PDF_B64=$(cat pdf_base64.txt)
 
-      - name: Send to DocuSign
+          echo "base64=$PDF_B64" >> $GITHUB_OUTPUT
+
+      - name: Send PDF to DocuSign
         if: steps.pdf.outputs.path != ''
         env:
-          DOCUSIGN_BASE_URI:      ${{ secrets.DOCUSIGN_BASE_URI }}
-          DOCUSIGN_ACCOUNT_ID:    ${{ secrets.DOCUSIGN_ACCOUNT_ID }}
-          DOCUSIGN_SIGNER_EMAIL:  ${{ secrets.DOCUSIGN_SIGNER_EMAIL }}
-          DOCUSIGN_SIGNER_NAME:   ${{ secrets.DOCUSIGN_SIGNER_NAME }}
+          DOCUSIGN_ACCOUNT_ID:  ${{ secrets.DOCUSIGN_ACCOUNT_ID }}
+          DOCUSIGN_BASE_PATH:   ${{ secrets.DOCUSIGN_BASE_PATH }}
+          DOCUSIGN_SIGNER_EMAIL:${{ secrets.DOCUSIGN_SIGNER_EMAIL }}
+          DOCUSIGN_SIGNER_NAME: ${{ secrets.DOCUSIGN_SIGNER_NAME }}
+          ACCESS_TOKEN:         ${{ steps.jwt.outputs.access_token }}
         run: |
           set -e
 
-          ACCESS_TOKEN="${{ steps.jwt.outputs.token }}"
-          B64=$(cat pdf_base64.txt)
-          FILENAME="${{ steps.prepare.outputs.filename }}"
+          echo "Preparing to send envelope to DocuSign..."
 
-          if [ -z "$ACCESS_TOKEN" ]; then
-            echo "No access token"
-            exit 1
-          fi
+          PDF_B64="${{ steps.pdf_b64.outputs.base64 }}"
+          DOC_NAME=$(basename "${{ steps.pdf.outputs.path }}")
 
-          echo "Creating envelope for $FILENAME..."
-
-          PAYLOAD=$(jq -n \
-            --arg subject "Please sign: $FILENAME" \
-            --arg doc_b64 "$B64" \
-            --arg doc_name "$FILENAME" \
+          REQUEST_BODY=$(jq -n \
+            --arg account_id "$DOCUSIGN_ACCOUNT_ID" \
+            --arg doc_b64 "$PDF_B64" \
+            --arg doc_name "$DOC_NAME" \
             --arg signer_email "$DOCUSIGN_SIGNER_EMAIL" \
             --arg signer_name "$DOCUSIGN_SIGNER_NAME" \
             '{
-              emailSubject: $subject,
+              emailSubject: "Please sign the approved document",
               documents: [{
                 documentBase64: $doc_b64,
                 name: $doc_name,
@@ -192,7 +181,7 @@ EOF
                       documentId: "1",
                       pageNumber: "1",
                       xPosition: "100",
-                      yPosition: "100"
+                      yPosition: "150"
                     }]
                   }
                 }]
@@ -200,12 +189,16 @@ EOF
               status: "sent"
             }')
 
-          RESPONSE=$(curl --silent --show-error --fail \
-            --request POST \
-            --url "${DOCUSIGN_BASE_URI}/restapi/v2.1/accounts/${DOCUSIGN_ACCOUNT_ID}/envelopes" \
+          echo "Sending envelope to DocuSign..."
+
+          RESPONSE=$(curl -sS --request POST \
+            "https://${DOCUSIGN_BASE_PATH}/restapi/v2.1/accounts/${DOCUSIGN_ACCOUNT_ID}/envelopes" \
             --header "Authorization: Bearer ${ACCESS_TOKEN}" \
             --header "Content-Type: application/json" \
-            --data "$PAYLOAD")
+            --data "$REQUEST_BODY")
+
+          echo "DocuSign response:"
+          echo "$RESPONSE"
 
           ENVELOPE_ID=$(echo "$RESPONSE" | jq -r '.envelopeId')
 
