@@ -5,10 +5,11 @@ on:
     branches-ignore:
       - main
     paths:
-      - "incoming/*.docx"
+      - 'incoming/*.docx'
+      - '.github/workflows/docx-to-md.yml'
 
 jobs:
-  build-docs:
+  docx_to_md_pdf:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -19,42 +20,24 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Проверяем, есть ли DOCX вообще
-      - name: Detect DOCX files
-        id: detect
-        run: |
-          FILES=$(ls incoming/*.docx 2>/dev/null || true)
-          if [ -z "$FILES" ]; then
-            echo "has_docx=false" >> $GITHUB_OUTPUT
-            echo "ℹ️ No DOCX files found in incoming/"
-          else
-            echo "has_docx=true" >> $GITHUB_OUTPUT
-            echo "Found DOCX files:"
-            echo "$FILES"
-          fi
-
-      - name: Install pandoc + LaTeX
-        if: ${{ steps.detect.outputs.has_docx == 'true' }}
+      - name: Install pandoc and LaTeX
         run: |
           sudo apt-get update
-          sudo apt-get install -y pandoc
-          sudo apt-get install -y texlive-latex-base texlive-fonts-recommended texlive-latex-extra
+          sudo apt-get install -y pandoc texlive-latex-base texlive-latex-extra texlive-fonts-recommended
 
-      - name: Convert DOCX to MD + PDF
-        if: ${{ steps.detect.outputs.has_docx == 'true' }}
+      - name: Convert DOCX to MD+PDF
         run: |
+          set -e
+
           mkdir -p docs archive
-          count=0
 
           for f in incoming/*.docx; do
-            [ -e "$f" ] || continue
+            [ -e "$f" ] || { echo "No DOCX files in incoming/"; break; }
+
             base=$(basename "$f" .docx)
             timestamp=$(date +%Y%m%d%H%M%S)
-            count=$((count+1))
 
-            echo "Processing $f"
-
-            # Архивируем старые версии, если есть
+            # Архивируем предыдущие версии, если есть
             if [ -f "docs/${base}.md" ]; then
               mv "docs/${base}.md" "archive/${base}-${timestamp}.md"
             fi
@@ -62,26 +45,25 @@ jobs:
               mv "docs/${base}.pdf" "archive/${base}-${timestamp}.pdf"
             fi
 
-            # DOCX -> MD (GitHub Flavored Markdown)
-            pandoc "$f" -f docx -t gfm -o "docs/${base}.md"
+            echo "Converting $f → docs/${base}.md / .pdf"
 
-            # DOCX -> PDF
+            pandoc "$f" -f docx -t gfm -o "docs/${base}.md"
             pandoc "$f" -f docx -o "docs/${base}.pdf" --pdf-engine=pdflatex
           done
 
-          echo "processed_count=$count" >> $GITHUB_OUTPUT
-
-      - name: Commit generated MD+PDF into PR branch
-        if: ${{ steps.detect.outputs.has_docx == 'true' }}
+      - name: Commit changes back to PR branch
         run: |
-          git config user.name "doc-bot"
-          git config user.email "doc-bot@example.com"
+          set -e
 
-          git add docs/*.md docs/*.pdf archive/* || true
-          if git diff --cached --quiet; then
+          if git diff --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
-          git commit -m "Auto: DOCX to MD+PDF"
+          git config user.name "doc-bot"
+          git config user.email "doc-bot@example.com"
+
+          git add docs/*.md docs/*.pdf
+          git add -f archive/* || true
+          git commit -m "Auto: convert DOCX to MD+PDF"
           git push origin HEAD
