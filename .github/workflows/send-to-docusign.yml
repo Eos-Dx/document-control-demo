@@ -82,9 +82,7 @@ jobs:
 
           echo "Generating JWT..."
 
-          cat <<EOF > private.key
-${DOCUSIGN_PRIVATE_KEY}
-EOF
+          echo "$DOCUSIGN_PRIVATE_KEY" > private.key
           chmod 600 private.key
 
           NOW=$(date +%s)
