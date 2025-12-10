@@ -6,6 +6,13 @@ on:
       - main
     paths:
       - "docs/*.pdf"
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+    paths:
+      - "docs/*.pdf"
   workflow_dispatch:
     inputs:
       pdf_file:
@@ -16,6 +23,7 @@ on:
 jobs:
   send_to_docusign:
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
     permissions:
       contents: read
 
