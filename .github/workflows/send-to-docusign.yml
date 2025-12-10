@@ -40,6 +40,9 @@ jobs:
         run: |
           set -e
 
+          echo "Event: ${{ github.event_name }}"
+          echo "SHA: $GITHUB_SHA"
+
           # 1) Manual trigger via workflow_dispatch
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.pdf_file }}" ]; then
             PDF_PATH="docs/${{ github.event.inputs.pdf_file }}"
@@ -53,12 +56,33 @@ jobs:
             fi
           fi
 
-          # 2) Automatic trigger on push or PR merge
-          FILES=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" -- "docs/*.pdf" || true)
+          # 2) Automatic trigger on push or PR merge - find changed PDFs
+          echo "Looking for changed PDFs in commit $GITHUB_SHA..."
+
+          # Try different approaches to find changed files
+          echo "Method 1: git diff-tree"
+          git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" || true
+
+          echo "Method 2: git show"
+          git show --name-only --format="" "$GITHUB_SHA" || true
+
+          echo "Method 3: Checking docs/ directory"
+          ls -la docs/*.pdf 2>/dev/null || echo "No PDFs found in docs/"
+
+          FILES=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep "^docs/.*\.pdf$" || true)
 
           if [ -z "$FILES" ]; then
-            echo "No changed PDFs detected."
-            exit 0
+            echo "No changed PDFs detected in diff-tree."
+            # Fallback: check if any PDFs exist and use the most recent
+            if ls docs/*.pdf 1> /dev/null 2>&1; then
+              FIRST=$(ls -t docs/*.pdf | head -n 1)
+              echo "No git changes found, but using most recent PDF: $FIRST"
+              echo "path=$FIRST" >> "$GITHUB_OUTPUT"
+              exit 0
+            else
+              echo "No PDFs found at all."
+              exit 0
+            fi
           fi
 
           echo "Changed PDFs:"
@@ -67,18 +91,6 @@ jobs:
           FIRST=$(echo "$FILES" | head -n 1)
           echo "Using: $FIRST"
           echo "path=$FIRST" >> "$GITHUB_OUTPUT"
-
-      - name: Ensure PDF exists
-        if: steps.pdf.outputs.path == ''
-        run: |
-          echo "No approved PDF to send. Skipping DocuSign step."
-          exit 0
-
-      - name: Show selected PDF
-        if: steps.pdf.outputs.path != ''
-        run: |
-          echo "Selected PDF: ${{ steps.pdf.outputs.path }}"
-          ls -lh "${{ steps.pdf.outputs.path }}"
 
       - name: Get DocuSign access token (JWT)
         if: steps.pdf.outputs.path != ''
@@ -163,12 +175,12 @@ jobs:
         run: |
           set -e
 
-          ACCESS_TOKEN="${{ steps.jwt.outputs.token }}"
+          ACCESS_TOKEN="${{ steps.jwt.outputs.access_token }}"
           B64=$(cat pdf_base64.txt)
           FILENAME="${{ steps.prepare.outputs.filename }}"
 
           if [ -z "$ACCESS_TOKEN" ]; then
-            echo "No token"
+            echo "No access token available"
             exit 1
           fi
 
