@@ -1,10 +1,13 @@
+**APPENDIX A-01**
+
 **Roles & Responsibilities**
 
-| **Document ID:**    | A-01       | **Version:**     | 1.0        |
+|                     |            |                  |            |
 |---------------------|------------|------------------|------------|
+| **Document ID:**    | A-01       | **Version:**     | 1.0        |
 | **Effective Date:** | YYYY-MM-DD | **Review Date:** | YYYY-MM-DD |
 
-# 1. Quality Manager 
+1\. Quality Manager
 
 **Responsibilities:**
 
@@ -16,9 +19,7 @@
 
 - Management of CAPA and deviation processes
 
-- New CAPA
-
-# 2. Development Lead
+2\. Development Lead
 
 **Responsibilities:**
 
@@ -30,7 +31,7 @@
 
 - Change Request creation and technical assessment
 
-# 3. QA Lead
+3\. QA Lead
 
 **Responsibilities:**
 
@@ -42,7 +43,7 @@
 
 - Final approval of lab results
 
-# 4. SRE/DevOps Lead
+4\. SRE/DevOps Lead
 
 **Responsibilities:**
 
@@ -54,7 +55,7 @@
 
 - Lab equipment setup and validation support
 
-# 5. Product Owner
+5\. Product Owner
 
 **Responsibilities:**
 

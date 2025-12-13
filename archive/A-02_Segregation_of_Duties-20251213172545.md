@@ -1,24 +1,25 @@
+**APPENDIX A-02**
+
 **Segregation of Duties (SoD)**
 
-| **Document ID:**    | A-02       | **Version:**     | 1.0        |
+|                     |            |                  |            |
 |---------------------|------------|------------------|------------|
+| **Document ID:**    | A-02       | **Version:**     | 1.0        |
 | **Effective Date:** | YYYY-MM-DD | **Review Date:** | YYYY-MM-DD |
 
-# 1. Purpose
+1\. Purpose
 
 This appendix defines the Segregation of Duties (SoD) matrix to ensure
 that no single individual has control over all phases of a critical
 process. This reduces the risk of errors, fraud, and non-compliance with
 FDA regulations (21 CFR Part 11 and Part 820).
 
-Something is here to check
-
-# 2. Scope
+2\. Scope
 
 This SoD matrix applies to all software development, quality management,
 and laboratory operations processes within the organization.
 
-# 3. Key Principles
+3\. Key Principles
 
 - **No single person can initiate AND approve a change**
 
@@ -30,7 +31,7 @@ and laboratory operations processes within the organization.
 
 - **Document approval requires segregation between author and approver**
 
-# 4. Segregation of Duties Matrix
+4\. Segregation of Duties Matrix
 
 The following table defines which roles can perform which actions. ✓ =
 Allowed, ✗ = Prohibited
@@ -49,7 +50,7 @@ Allowed, ✗ = Prohibited
 
 *\* Developer can approve Pull Request only if they are NOT the author*
 
-# 5. Critical Requirements
+5\. Critical Requirements
 
 - **Minimum 2 approvers required for all Pull Requests**
 
@@ -62,13 +63,14 @@ Allowed, ✗ = Prohibited
 - **All changes must go through Pull Request process (no direct commits
   to main)**
 
-# 6. Approvals
+6\. Approvals
 
 This document requires electronic signature approval via DocuSign (21
 CFR Part 11 compliant).
 
-| **Role**                   | **Name** | **Signature & Date** |
+|                            |          |                      |
 |----------------------------|----------|----------------------|
+| **Role**                   | **Name** | **Signature & Date** |
 | Author                     | \[Name\] | \[DocuSign Field\]   |
 | Reviewer (QA Lead)         | \[Name\] | \[DocuSign Field\]   |
 | Approver (Quality Manager) | \[Name\] | \[DocuSign Field\]   |
