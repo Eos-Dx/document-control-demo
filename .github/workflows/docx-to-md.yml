@@ -23,7 +23,7 @@ jobs:
       - name: Install pandoc and LaTeX
         run: |
           sudo apt-get update
-          sudo apt-get install -y pandoc texlive-latex-base texlive-latex-extra texlive-fonts-recommended
+          sudo apt-get install -y pandoc texlive-xetex texlive-latex-extra texlive-fonts-recommended
 
       - name: Convert DOCX to MD+PDF
         run: |
@@ -48,7 +48,7 @@ jobs:
             echo "Converting $f → docs/${base}.md / .pdf"
 
             pandoc "$f" -f docx -t gfm -o "docs/${base}.md"
-            pandoc "$f" -f docx -o "docs/${base}.pdf" --pdf-engine=pdflatex
+            pandoc "$f" -f docx -o "docs/${base}.pdf" --pdf-engine=xelatex
           done
 
       - name: Commit changes back to PR branch
